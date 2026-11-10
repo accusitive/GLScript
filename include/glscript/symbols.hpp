@@ -3,6 +3,7 @@
 #include "glscript/ast.hpp"
 #include "glscript/source.hpp"
 #include "glscript/type.hpp"
+#include "glscript/value.hpp"
 
 #include <memory>
 #include <string>
@@ -24,6 +25,7 @@ struct FieldSymbol {
     std::string name;
     TypePtr type;
     std::size_t index = 0;
+    TypeSymbol* owner = nullptr;
     ast::Visibility visibility = ast::Visibility::Local;
     SourceSpan span;
 };
@@ -40,6 +42,7 @@ struct OperatorInfo {
     std::string op;
     std::vector<TypePtr> operands;
     TypePtr result;
+    HostCall host_call; // empty when the overload has no host implementation
 };
 
 struct FunctionSymbol {
@@ -55,6 +58,7 @@ struct FunctionSymbol {
     bool aborting = false;
     bool is_effect_operation = false;
     bool is_host = false;
+    HostCall host_call; // empty for script functions
     TypeSymbol* owner = nullptr;
     SourceSpan span;
     ast::FunctionDecl* declaration = nullptr;

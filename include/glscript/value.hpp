@@ -1,7 +1,5 @@
 #pragma once
 
-#include "glscript/symbols.hpp"
-
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -10,6 +8,12 @@
 #include <vector>
 
 namespace glscript {
+
+struct TypeSymbol;
+struct EnumVariantSymbol;
+struct FunctionSymbol;
+struct FieldSymbol;
+struct OperatorInfo;
 
 // ---------------------------------------------------------------------------
 // Runtime values
@@ -53,6 +57,10 @@ struct Value {
     // the enum/class qualified name, "function", "continuation").
     std::string type_name() const;
 };
+
+// A host-callable thunk. Receives the arguments (the receiver is args[0] for
+// instance methods); the registry owns the thunk and outlives the runtime.
+using HostCall = std::function<Value(std::vector<Value>& args)>;
 
 // ---------------------------------------------------------------------------
 // GC objects

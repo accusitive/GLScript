@@ -1,5 +1,7 @@
 #include "glscript/value.hpp"
 
+#include "glscript/symbols.hpp"
+
 namespace glscript {
 
 std::string Value::type_name() const {

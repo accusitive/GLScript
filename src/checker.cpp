@@ -465,6 +465,7 @@ void CheckerImpl::resolve_host_signatures() {
                                                    type->type_parameters);
                 field.visibility = from_host_visibility(field_schema.visibility);
                 field.index = type->fields.size();
+                field.owner = type;
                 if (type->fields.contains(field.name)) {
                     error(SourceSpan{}, "duplicate field '" + field.name + "' in host type '" +
                                             type->qualified_name + "'");
@@ -1075,6 +1076,7 @@ void CheckerImpl::resolve_class_signature(ModuleInfo& module, TypeSymbol& type,
         symbol.visibility = field->visibility;
         symbol.span = field->span;
         symbol.index = type.fields.size();
+        symbol.owner = &type;
 
         if (type.fields.contains(symbol.name)) {
             error(field->span, "duplicate field '" + symbol.name + "'");
@@ -1455,6 +1457,8 @@ void CheckerImpl::check_handler_declaration(ModuleInfo& module,
         } else if (effect->kind != TypeSymbol::Kind::Effect) {
             error(declaration.span, "'" + declaration.effect + "' is not an effect");
             effect = nullptr;
+        } else {
+            const_cast<std::string&>(declaration.effect) = effect->qualified_name;
         }
     }
 
@@ -2291,6 +2295,10 @@ TypePtr CheckerImpl::check_handler_case(const ast::HandlerCase& handler_case,
         error(handler_case.span, "'" + effect->qualified_name + "' is not an effect");
         return types::error();
     }
+
+    // Normalize the case's effect name to the qualified name so downstream
+    // consumers (the bytecode compiler) don't need to re-resolve it.
+    const_cast<std::string&>(handler_case.effect) = effect->qualified_name;
 
     const auto operation_it = effect->methods.find(handler_case.operation);
     if (operation_it == effect->methods.end() ||
