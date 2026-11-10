@@ -234,6 +234,11 @@ debugging surface the refactor exists for.
   refactor. Sequenced after the refactor: slice the captured stack from the
   bottom captured frame's base so a completed continuation's `Return` restores
   the resumer's stack exactly, then get the suite green.
+  *(Fixed 2026-11-10, going further than the slicing rule: the capture now
+  stops at resume-splice frames — they stay live and receive the handler's
+  return — and a resume of a non-empty continuation transfers control,
+  replacing the resuming handler activation; identity continuations just push
+  the value. Full suite green: 38/38.)*
 - Captured-variable assignment (by-value upvalues) — unchanged limitation.
 - `IndexExpr` and dynamic member semantics — unchanged (HIR keeps
   `FieldDynamic`; indexing still a stub).

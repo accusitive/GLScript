@@ -50,6 +50,10 @@ private:
         std::uint32_t ip = 0;
         std::uint32_t base = 0;
         Value closure; // ClosureObj when invoked as a first-class value
+        // Set on frames installed by a resume splice. A raise inside a
+        // resumed slice captures nothing above it: the slice stays live and
+        // receives the handler's return value at its raise site.
+        bool resumed_slice = false;
     };
 
     struct HandlerFrame {
@@ -96,6 +100,9 @@ private:
     std::vector<Value> stack_;
     std::vector<Frame> frames_;
     std::vector<HandlerFrame> handlers_;
+    // GC roots for every captured continuation (they may outlive the stack
+    // slots that referenced them, e.g. after a transfer resume).
+    std::vector<Value> continuations_;
     std::vector<std::vector<Value>> constants_; // per function, strings interned
     Value result_;
     bool failed_ = false;

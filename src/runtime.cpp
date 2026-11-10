@@ -156,12 +156,15 @@ std::string Runtime::stringify(const Value& value) {
 
 void Runtime::gc_collect() {
     std::vector<Value*> roots;
-    roots.reserve(stack_.size() + frames_.size());
+    roots.reserve(stack_.size() + frames_.size() + continuations_.size());
     for (auto& value : stack_) {
         roots.push_back(&value);
     }
     for (auto& frame : frames_) {
         roots.push_back(&frame.closure);
+    }
+    for (auto& continuation : continuations_) {
+        roots.push_back(&continuation);
     }
     for (auto& function_constants : constants_) {
         for (auto& value : function_constants) {
@@ -495,42 +498,64 @@ void Runtime::invoke_handler(const HandlerFrame& handler, const HandlerEntry& en
                              const SourceSpan& span) {
     (void)span;
 
-    // Capture the continuation: frames above the delimiter, the stack from
-    // the delimiter frame's base, and the handlers installed above it.
+    // Capture the continuation: the fresh frames above the delimiter, the
+    // stack from the bottom captured frame's base, and the handlers whose
+    // delimiters sit in the captured region. Frames installed by a resume
+    // splice stay live and paused below the handler activation — they
+    // receive the handler's return value at their raise site — so the
+    // continuation only needs what is not already running.
     const std::uint32_t delimiter = handler.frame_index;
     const std::uint32_t current = static_cast<std::uint32_t>(frames_.size() - 1);
 
-    auto* continuation = heap_.allocate<ContinuationObj>();
-    continuation->frame_base = delimiter + 1;
-    continuation->stack_base = frames_[delimiter].base;
-    continuation->stack.assign(stack_.begin() + frames_[delimiter].base, stack_.end());
+    std::uint32_t capture_start = delimiter + 1;
+    for (std::uint32_t i = current; i > delimiter; --i) {
+        if (frames_[i].resumed_slice) {
+            capture_start = i + 1;
+            break;
+        }
+    }
+    const bool has_frames = capture_start <= current;
 
-    for (std::uint32_t i = delimiter + 1; i <= current; ++i) {
-        ContinuationFrame frame;
-        frame.function = frames_[i].function;
-        frame.ip = frames_[i].ip;
-        frame.base = frames_[i].base;
-        frame.closure = frames_[i].closure;
-        continuation->frames.push_back(frame);
+    auto* continuation = heap_.allocate<ContinuationObj>();
+    continuation->frame_base = capture_start;
+    if (has_frames) {
+        continuation->stack_base = frames_[capture_start].base;
+        continuation->stack.assign(stack_.begin() + continuation->stack_base, stack_.end());
+        for (std::uint32_t i = capture_start; i <= current; ++i) {
+            ContinuationFrame frame;
+            frame.function = frames_[i].function;
+            frame.ip = frames_[i].ip;
+            frame.base = frames_[i].base;
+            frame.closure = frames_[i].closure;
+            continuation->frames.push_back(frame);
+        }
     }
     for (std::size_t i = handler_index + 1; i < handlers_.size(); ++i) {
-        continuation->handlers.push_back(ContinuationHandler{
-            handlers_[i].table, handlers_[i].frame_index, handlers_[i].stack_base});
+        if (!has_frames || handlers_[i].frame_index >= capture_start) {
+            continuation->handlers.push_back(ContinuationHandler{
+                handlers_[i].table, handlers_[i].frame_index, handlers_[i].stack_base});
+        }
     }
+    continuations_.push_back(Value::heap(continuation)); // GC root
 
-    // Move the operation arguments to a fresh region and call the handler
-    // with them plus the continuation. The delimiter frame stays as the
-    // handler's caller: when the handler returns, its value is the value of
-    // the whole `handle` expression.
+    // Suspend the captured region and activate the handler on top of what
+    // stayed live. When the handler returns, its value lands exactly where
+    // the raise site's caller expects the operation result — and for the
+    // outermost handler, the value of the whole `handle` expression.
     std::vector<Value> args(stack_.end() - argc, stack_.end());
-    stack_.resize(handler.stack_base);
+    if (has_frames) {
+        stack_.resize(continuation->stack_base);
+    }
     for (auto& argument : args) {
         stack_.push_back(argument);
     }
     stack_.push_back(Value::heap(continuation));
 
-    frames_.resize(delimiter + 1);
-    handlers_.resize(handler_index + 1);
+    frames_.resize(capture_start);
+    while (handlers_.size() > handler_index + 1 &&
+           handlers_.back().frame_index >= capture_start) {
+        handlers_.pop_back(); // suspended with the captured frames
+    }
 
     push_frame(entry.function, argc + 1, Value::unit());
 }
@@ -542,14 +567,31 @@ bool Runtime::resume_continuation(const Value& continuation_value, Value result)
     }
     const auto* continuation = as_continuation(continuation_value);
 
-    // Splice shifted copies of the captured state on top of the live machine.
-    const std::uint32_t stack_delta =
-        static_cast<std::uint32_t>(stack_.size()) - continuation->stack_base;
-    const std::uint32_t frames_delta =
-        static_cast<std::uint32_t>(frames_.size()) - continuation->frame_base;
+    if (continuation->frames.empty()) {
+        // Identity continuation: the raise happened in a frame that stayed
+        // live (the delimiter frame itself, or a resumed slice). The resumed
+        // value is the operation's result and the handler keeps running.
+        stack_.push_back(result);
+        return true;
+    }
 
+    // Transfer: the resuming activation is replaced by the captured
+    // computation. The continuation's stack slice lands at the resumer's
+    // base, so when the spliced computation returns, its completion takes
+    // exactly the place of the resumer's return value — the resumer's own
+    // remaining code is abandoned, tail-position resume semantics.
+    const std::uint32_t resumer_base = frames_.back().base;
+    frames_.pop_back();
+    while (!handlers_.empty() && handlers_.back().frame_index >= frames_.size()) {
+        handlers_.pop_back(); // delimited by the replaced activation
+    }
+    stack_.resize(resumer_base);
+
+    const std::uint32_t stack_delta = resumer_base - continuation->stack_base;
     stack_.insert(stack_.end(), continuation->stack.begin(), continuation->stack.end());
 
+    const std::uint32_t frames_delta =
+        static_cast<std::uint32_t>(frames_.size()) - continuation->frame_base;
     for (const auto& captured : continuation->frames) {
         Frame frame;
         frame.function = captured.function;
@@ -557,6 +599,7 @@ bool Runtime::resume_continuation(const Value& continuation_value, Value result)
         frame.ip = captured.ip;
         frame.base = captured.base + stack_delta;
         frame.closure = captured.closure;
+        frame.resumed_slice = true;
         frames_.push_back(std::move(frame));
     }
     for (const auto& captured : continuation->handlers) {
@@ -587,11 +630,6 @@ void Runtime::execute() {
         frame.ip = ip + 1 + static_cast<std::uint32_t>(operand_count(op));
         const SourceSpan span = frame.fn->spans[ip];
 
-        if (std::getenv("GLTRACE") != nullptr) {
-            std::fprintf(stderr, "ip=%u op=%d stack=%zu frames=%zu handlers=%zu\n", ip,
-                         static_cast<int>(op), stack_.size(), frames_.size(),
-                         handlers_.size());
-        }
         switch (op) {
         case Op::LoadConst:
             stack_.push_back(constants_[frame.function][operands[0]]);

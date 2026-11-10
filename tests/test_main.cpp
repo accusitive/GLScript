@@ -640,7 +640,7 @@ effect Counter {
 }
 
 function main() {
-    int x = count();
+    int x = Counter::count();
     println(`${x}`);
 }
 )GL",
