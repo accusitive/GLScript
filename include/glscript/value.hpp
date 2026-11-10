@@ -14,6 +14,7 @@ struct EnumVariantSymbol;
 struct FunctionSymbol;
 struct FieldSymbol;
 struct OperatorInfo;
+class Runtime;
 
 // ---------------------------------------------------------------------------
 // Runtime values
@@ -58,9 +59,10 @@ struct Value {
     std::string type_name() const;
 };
 
-// A host-callable thunk. Receives the arguments (the receiver is args[0] for
-// instance methods); the registry owns the thunk and outlives the runtime.
-using HostCall = std::function<Value(std::vector<Value>& args)>;
+// A host-callable thunk. Receives the runtime (for allocating values) and the
+// arguments; the receiver is args[0] for instance methods. The registry owns
+// the thunk and outlives the runtime.
+using HostCall = std::function<Value(Runtime& runtime, std::vector<Value>& args)>;
 
 // ---------------------------------------------------------------------------
 // GC objects
@@ -95,6 +97,8 @@ struct StringObj : GcObject {
 };
 
 struct EnumObj : GcObject {
+    EnumObj() : GcObject(Kind::Enum) {}
+
     const EnumVariantSymbol* variant = nullptr;
     std::vector<Value> payload;
 
@@ -112,6 +116,8 @@ struct EnumObj : GcObject {
 // host owns (never traced, never collected). A host class with no script
 // fields is simply an instance with an empty field vector.
 struct ObjectInstance : GcObject {
+    ObjectInstance() : GcObject(Kind::Object) {}
+
     const TypeSymbol* type = nullptr;
     std::vector<Value> fields;
     void* host = nullptr;
@@ -126,6 +132,8 @@ struct ObjectInstance : GcObject {
 };
 
 struct ClosureObj : GcObject {
+    ClosureObj() : GcObject(Kind::Closure) {}
+
     std::uint32_t function = 0;
     std::vector<Value> captures;
 
@@ -146,6 +154,7 @@ struct ContinuationFrame {
     std::uint32_t function = 0; // index into CompiledProgram::functions
     std::uint32_t ip = 0;
     std::uint32_t base = 0;     // stack base at capture
+    Value closure;              // active closure of the frame, if any
 };
 
 struct ContinuationHandler {
@@ -155,6 +164,9 @@ struct ContinuationHandler {
 };
 
 struct ContinuationObj : GcObject {
+    ContinuationObj() : GcObject(Kind::Continuation) {}
+
+    std::uint32_t frame_base = 0; // original frame index of frames[0]
     std::uint32_t stack_base = 0; // stack slice start (delimiter frame's base) at capture
     std::vector<Value> stack;
     std::vector<ContinuationFrame> frames;
@@ -164,6 +176,11 @@ struct ContinuationObj : GcObject {
         for (auto& value : stack) {
             if (value.is_heap()) {
                 visit(value.as_heap());
+            }
+        }
+        for (const auto& frame : frames) {
+            if (frame.closure.is_heap()) {
+                visit(frame.closure.as_heap());
             }
         }
     }

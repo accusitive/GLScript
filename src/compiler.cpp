@@ -129,7 +129,10 @@ private:
     // Emission helpers
     // ------------------------------------------------------------------
 
+    // Spans are recorded per code word so the interpreter can look one up
+    // directly by instruction pointer.
     std::uint32_t emit(Op op, const SourceSpan& span) {
+        current_span_ = span;
         auto& code = fn().code;
         code.push_back(static_cast<std::uint32_t>(op));
         fn().spans.push_back(span);
@@ -138,6 +141,7 @@ private:
 
     std::uint32_t emit_word(std::uint32_t word) {
         fn().code.push_back(word);
+        fn().spans.push_back(current_span_);
         return static_cast<std::uint32_t>(fn().code.size() - 1);
     }
 
@@ -1076,6 +1080,7 @@ private:
     const Program& program_;
     CompiledProgram output_;
     FuncState* state_ = nullptr;
+    SourceSpan current_span_;
 };
 
 } // namespace
