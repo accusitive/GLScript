@@ -1,6 +1,7 @@
 #pragma once
 
 #include "glscript/type.hpp"
+#include "glscript/value.hpp"
 
 #include <memory>
 #include <optional>
@@ -60,6 +61,7 @@ struct FunctionSchema {
     bool aborting = false;
     HostVisibility visibility = HostVisibility::Pub;
     std::vector<std::string> attributes;
+    HostCall call; // empty when the host has no implementation
 };
 
 struct FieldSchema {
@@ -72,6 +74,7 @@ struct OperatorSchema {
     std::string op;
     std::vector<TypeRef> operands;
     TypeRef result;
+    HostCall call; // empty when the host has no implementation
 };
 
 struct EnumVariantSchema {
@@ -143,8 +146,26 @@ public:
         return *this;
     }
 
+    FunctionBuilder& call(HostCall implementation) {
+        schema_->call = std::move(implementation);
+        return *this;
+    }
+
 private:
     FunctionSchema* schema_;
+};
+
+class OperatorBuilder {
+public:
+    explicit OperatorBuilder(OperatorSchema* schema) : schema_(schema) {}
+
+    OperatorBuilder& call(HostCall implementation) {
+        schema_->call = std::move(implementation);
+        return *this;
+    }
+
+private:
+    OperatorSchema* schema_;
 };
 
 class TypeBuilder {
@@ -204,16 +225,17 @@ public:
         return FunctionBuilder(schema_->methods.back().get());
     }
 
-    TypeBuilder& binary_operator(std::string op, TypeRef left, TypeRef right, TypeRef result) {
-        schema_->operators.push_back(
-            OperatorSchema{std::move(op), {std::move(left), std::move(right)}, std::move(result)});
-        return *this;
+    OperatorBuilder binary_operator(std::string op, TypeRef left, TypeRef right,
+                                    TypeRef result) {
+        schema_->operators.push_back(OperatorSchema{
+            std::move(op), {std::move(left), std::move(right)}, std::move(result), {}});
+        return OperatorBuilder(&schema_->operators.back());
     }
 
-    TypeBuilder& unary_operator(std::string op, TypeRef operand, TypeRef result) {
+    OperatorBuilder unary_operator(std::string op, TypeRef operand, TypeRef result) {
         schema_->operators.push_back(
-            OperatorSchema{std::move(op), {std::move(operand)}, std::move(result)});
-        return *this;
+            OperatorSchema{std::move(op), {std::move(operand)}, std::move(result), {}});
+        return OperatorBuilder(&schema_->operators.back());
     }
 
     TypeBuilder& variant(std::string name, std::vector<TypeRef> payload = {}) {

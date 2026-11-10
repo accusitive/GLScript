@@ -497,6 +497,7 @@ void CheckerImpl::resolve_host_signatures() {
                     type->kind == TypeSymbol::Kind::Effect && !function_schema->attributes.empty()
                         ? true
                         : type->kind == TypeSymbol::Kind::Effect;
+                function->host_call = function_schema->call;
 
                 if (type->methods.contains(function->name)) {
                     error(SourceSpan{}, "duplicate method '" + function->name + "' in host type '" +
@@ -517,6 +518,7 @@ void CheckerImpl::resolve_host_signatures() {
                 }
                 info.result =
                     resolve_host_type_ref(operator_schema.result, module, type->type_parameters);
+                info.host_call = operator_schema.call;
                 type->operators.push_back(std::move(info));
             }
 
@@ -556,6 +558,7 @@ void CheckerImpl::resolve_host_signatures() {
             }
             function->result = resolve_host_type_ref(function_schema->return_type, module,
                                                      function_schema->type_parameters);
+            function->host_call = function_schema->call;
             module.functions[function->name] = function;
         }
     }
