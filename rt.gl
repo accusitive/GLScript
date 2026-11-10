@@ -1,0 +1,10 @@
+effect RuntimeError {
+    #[abort]
+    function not_defined(name: String, span: Span);
+}
+handle RuntimeError {
+    function not_defined(name: String, span: Span) {
+        println(`Name ${name} not found!`);
+        abort();
+    } 
+}

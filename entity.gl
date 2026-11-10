@@ -1,0 +1,69 @@
+/*
+the runtime special cases a top-level effect and handler for every script entry:
+effect Runtime {
+    function log(message: String);
+    #[abort]
+    function invalid_downcast(message: String);
+    function get_script_name() -> String;
+    function get_object() -> GameObject;
+}
+// The user never types/cannot define a new handler for these, its implemented natively in the runtime, essentially
+handle (() => {/* global values */}) with {
+    Runtime::invalid_downcast(message: String) {
+        println(message);
+        abort();
+    } 
+    Runtime::get_script_name() -> String {
+        "example.gl"
+    }
+    // cant spell these in the scripting language, you get the point. its implemented in the c++ side
+    Runtime::get_object() -> GameObject {resume _}
+    Runtime::dt() -> float { resume _ }
+    Runtime::println(message: String) {
+        resume () // () is the unit value
+    }
+} 
+*/
+// import from another module
+/*
+input can define Axis like:
+    enum Axis {
+        Horizontal,
+        Vertical
+    }
+there can also be data, and type parameters
+    enum Expr<C> {
+        Add(Expr, Expr),
+        Sub(Expr, Expr),
+        Const(C)
+    }
+*/
+import input::{Input, Axis};
+
+import math::Vector3;
+// 3 visibility classes: 
+// `` = only accessible within the scope its defined in
+// `export` = symbols iterable by the host, does not imply `pub`
+// `pub` = accessible in the scope its defined in, and from other scripts that import it, but not iterable by the host
+// `export` classes/functions can have type parameters, and the host can interopate with them easily.
+export class PlayerMovement extends EntityBehaviour {
+    #[serialize]
+    float move_speed = 5.0f;
+    
+    export function update() {
+        // All host calls are routed through the Runtime effect
+        // Syntax to perform effects is simple, its identical to a function call
+        println("inside PlayerMovement");
+        // or more specifically (in the case of shadowing for example)
+        Runtime::println("also inside PlayerMovement");
+        float move_x = Input::get_axis(Axis::Horizontal);
+        float move_z = Input::get_axis(Axis::Vertical);
+        Vector3<float> move_direction = Vector3::new(move_x, 0.0f, move_z);
+
+        get_object().get_component<Transform>().translate(move_direction * move_speed * dt());
+        dynamic test = 100;
+
+        int d_test = downcast::<int> test; //downcast is an unary operator here
+        String d_test_fail = downcast::<String> test; 
+    }
+}
