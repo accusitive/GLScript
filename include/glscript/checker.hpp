@@ -2,6 +2,7 @@
 
 #include "glscript/diagnostic.hpp"
 #include "glscript/host.hpp"
+#include "glscript/symbols.hpp"
 
 #include <functional>
 #include <memory>
@@ -20,6 +21,8 @@ using ModuleLoader = std::function<std::optional<ModuleSource>(const std::string
 
 // Front end: parses a root script and all of its imports, then typechecks them.
 // The host registry supplies engine-defined modules, global types, and effects.
+// After check_source()/check_file(), the checked program (ASTs, symbols, and
+// per-expression bindings) is retained and available through program().
 class Frontend {
 public:
     Frontend(const HostRegistry& host, DiagnosticSink& diagnostics, ModuleLoader loader = {});
@@ -34,9 +37,14 @@ public:
                       std::string text);
     bool check_file(const std::string& path);
 
+    // The retained checked program. Returns an empty program before the first
+    // check call; each check call replaces the previous result.
+    const Program& program() const { return program_; }
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+    Program program_;
 };
 
 } // namespace glscript

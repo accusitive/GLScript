@@ -1,5 +1,6 @@
 #pragma once
 
+#include "glscript/binding.hpp"
 #include "glscript/source.hpp"
 
 #include <memory>
@@ -50,7 +51,11 @@ struct ErrorTypeExpr : TypeExpr {};
 struct Stmt;
 using StmtPtr = std::unique_ptr<Stmt>;
 
-struct Expr : Node {};
+// Every expression carries the binding the typechecker resolved for it. The
+// checker decorates the tree through const references, hence `mutable`.
+struct Expr : Node {
+    mutable Binding binding;
+};
 using ExprPtr = std::unique_ptr<Expr>;
 
 struct ErrorExpr : Expr {};

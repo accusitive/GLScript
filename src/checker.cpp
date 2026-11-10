@@ -2,6 +2,7 @@
 
 #include "glscript/ast.hpp"
 #include "glscript/parser.hpp"
+#include "glscript/symbols.hpp"
 #include "glscript/type.hpp"
 
 #include <algorithm>
@@ -16,113 +17,6 @@
 
 namespace glscript {
 namespace {
-
-struct TypeSymbol;
-struct FunctionSymbol;
-struct EnumVariantSymbol;
-
-struct FieldSymbol {
-    std::string name;
-    TypePtr type;
-    ast::Visibility visibility = ast::Visibility::Local;
-    SourceSpan span;
-};
-
-struct EnumVariantSymbol {
-    std::string name;
-    std::vector<TypePtr> payload;
-    TypePtr value_type;
-    TypeSymbol* owner = nullptr;
-    SourceSpan span;
-};
-
-struct OperatorInfo {
-    std::string op;
-    std::vector<TypePtr> operands;
-    TypePtr result;
-};
-
-struct FunctionSymbol {
-    std::string name;
-    std::string qualified_name;
-    std::vector<std::string> type_parameters;
-    std::size_t owner_type_parameter_count = 0;
-    std::vector<std::string> parameter_names;
-    std::vector<TypePtr> parameter_types;
-    TypePtr result = types::unit();
-    ast::Visibility visibility = ast::Visibility::Local;
-    bool is_static = true;
-    bool aborting = false;
-    bool is_effect_operation = false;
-    bool is_host = false;
-    TypeSymbol* owner = nullptr;
-    SourceSpan span;
-    ast::FunctionDecl* declaration = nullptr;
-};
-
-struct TypeSymbol {
-    enum class Kind {
-        Class,
-        Enum,
-        Effect,
-    };
-
-    Kind kind = Kind::Class;
-    std::string name;
-    std::string qualified_name;
-    std::string module;
-    std::vector<std::string> type_parameters;
-    ast::Visibility visibility = ast::Visibility::Local;
-    bool global = false;
-    bool is_host = false;
-    TypeSymbol* base = nullptr;
-    std::vector<TypePtr> base_arguments;
-    std::unordered_map<std::string, FieldSymbol> fields;
-    std::unordered_map<std::string, FunctionSymbol*> methods;
-    std::unordered_map<std::string, EnumVariantSymbol*> variants;
-    std::vector<OperatorInfo> operators;
-    std::vector<FunctionSymbol*> effect_operations;
-    SourceSpan span;
-    ast::ClassDecl* class_declaration = nullptr;
-    ast::EnumDecl* enum_declaration = nullptr;
-    ast::EffectDecl* effect_declaration = nullptr;
-};
-
-struct Symbol {
-    enum class Kind {
-        Variable,
-        Function,
-        EnumVariant,
-    };
-
-    Kind kind = Kind::Variable;
-    TypePtr type;
-    TypePtr receiver_type;
-    FunctionSymbol* function = nullptr;
-    EnumVariantSymbol* variant = nullptr;
-};
-
-struct Scope {
-    Scope* parent = nullptr;
-    std::unordered_map<std::string, Symbol> values;
-    std::unordered_map<std::string, TypeSymbol*> types;
-};
-
-struct ModuleInfo {
-    std::string name;
-    std::string path;
-    std::unique_ptr<ast::ModuleUnit> unit;
-    bool is_host = false;
-    bool loading = false;
-    bool signatures_resolved = false;
-    bool bodies_checked = false;
-    Scope* scope = nullptr;
-    std::vector<std::unique_ptr<TypeSymbol>> owned_types;
-    std::vector<std::unique_ptr<FunctionSymbol>> owned_functions;
-    std::vector<std::unique_ptr<EnumVariantSymbol>> owned_variants;
-    std::unordered_map<std::string, TypeSymbol*> types;
-    std::unordered_map<std::string, FunctionSymbol*> functions;
-};
 
 ast::Visibility from_host_visibility(HostVisibility visibility) {
     switch (visibility) {
@@ -266,6 +160,10 @@ public:
 
     bool check(const std::string& module_name, const std::string& path, std::string text);
 
+    // Moves everything the bytecode compiler needs into a retained Program.
+    // Only valid after check() has run, and only once.
+    Program take_program();
+
 private:
     struct HandlerContext {
         TypePtr operation_result;
@@ -314,6 +212,7 @@ private:
 
     Scope* make_scope(Scope* parent);
     void error(SourceSpan span, std::string message);
+    void bind(const ast::Expr& expression, Binding binding);
 
     TypeSymbol* lookup_type(const std::string& name) const;
     TypeSymbol* find_type_by_qualified(const std::string& name) const;
@@ -378,7 +277,7 @@ private:
                                 TypeSymbol* owner, const TypePtr& receiver_type);
     TypePtr check_value_call(const ast::CallExpr& expression, const TypePtr& function_type);
     bool find_field(TypeSymbol& type, const TypePtr& instance_type, const std::string& name,
-                    TypePtr& output) const;
+                    TypePtr& output, FieldSymbol*& field) const;
     bool find_method(TypeSymbol& type, const TypePtr& instance_type, const std::string& name,
                      MemberMethod& output) const;
 
@@ -389,8 +288,10 @@ private:
     bool is_named_subtype(const TypePtr& from, const TypePtr& to) const;
     bool is_condition_type(const TypePtr& type) const;
 
-    TypePtr find_operator(const TypePtr& left, const TypePtr& right, const std::string& op) const;
-    TypePtr find_unary_operator(const TypePtr& operand, const std::string& op) const;
+    TypePtr find_operator(const TypePtr& left, const TypePtr& right, const std::string& op,
+                          OperatorInfo*& operator_info, TypeSymbol*& operator_owner) const;
+    TypePtr find_unary_operator(const TypePtr& operand, const std::string& op,
+                                OperatorInfo*& operator_info) const;
     std::unordered_map<std::string, TypePtr> class_bindings(const TypeSymbol& type,
                                                             const TypePtr& instance) const;
     TypePtr function_type(const FunctionSymbol& function) const;
@@ -406,6 +307,20 @@ Scope* CheckerImpl::make_scope(Scope* parent) {
 
 void CheckerImpl::error(SourceSpan span, std::string message) {
     diagnostics_.error(span, std::move(message));
+}
+
+void CheckerImpl::bind(const ast::Expr& expression, Binding binding) {
+    expression.binding = std::move(binding);
+}
+
+Program CheckerImpl::take_program() {
+    Program program;
+    program.modules = std::move(modules_);
+    program.sources = std::move(sources_);
+    program.scopes = std::move(scopes_);
+    program.builtin_functions = std::move(builtin_functions_);
+    program.types_by_qname = std::move(types_by_qname_);
+    return program;
 }
 
 TypeSymbol* CheckerImpl::lookup_type(const std::string& name) const {
@@ -549,6 +464,7 @@ void CheckerImpl::resolve_host_signatures() {
                 field.type = resolve_host_type_ref(field_schema.type, module,
                                                    type->type_parameters);
                 field.visibility = from_host_visibility(field_schema.visibility);
+                field.index = type->fields.size();
                 if (type->fields.contains(field.name)) {
                     error(SourceSpan{}, "duplicate field '" + field.name + "' in host type '" +
                                             type->qualified_name + "'");
@@ -1158,6 +1074,7 @@ void CheckerImpl::resolve_class_signature(ModuleInfo& module, TypeSymbol& type,
         symbol.type = field->type != nullptr ? resolve_type(*field->type) : types::error();
         symbol.visibility = field->visibility;
         symbol.span = field->span;
+        symbol.index = type.fields.size();
 
         if (type.fields.contains(symbol.name)) {
             error(field->span, "duplicate field '" + symbol.name + "'");
@@ -1364,12 +1281,14 @@ std::unordered_map<std::string, TypePtr> CheckerImpl::class_bindings(
 }
 
 bool CheckerImpl::find_field(TypeSymbol& type, const TypePtr& instance_type,
-                             const std::string& name, TypePtr& output) const {
+                             const std::string& name, TypePtr& output,
+                             FieldSymbol*& field) const {
     const auto bindings = class_bindings(type, instance_type);
 
     const auto field_it = type.fields.find(name);
     if (field_it != type.fields.end()) {
         output = substitute(field_it->second.type, bindings);
+        field = &field_it->second;
         return true;
     }
 
@@ -1379,7 +1298,7 @@ bool CheckerImpl::find_field(TypeSymbol& type, const TypePtr& instance_type,
             base_arguments.push_back(substitute(argument, bindings));
         }
         auto base_type = make_named_type(type.base->qualified_name, std::move(base_arguments));
-        return find_field(*type.base, base_type, name, output);
+        return find_field(*type.base, base_type, name, output, field);
     }
 
     return false;
@@ -1421,10 +1340,11 @@ void CheckerImpl::add_type_members_to_scope(
         add_type_members_to_scope(*type.base, base_type, scope, base_bindings);
     }
 
-    for (const auto& [name, field] : type.fields) {
+    for (auto& [name, field] : type.fields) {
         Symbol symbol;
         symbol.kind = Symbol::Kind::Variable;
         symbol.type = substitute(field.type, bindings);
+        symbol.field = &field;
         scope->values[name] = symbol;
     }
 
@@ -1691,10 +1611,32 @@ TypePtr CheckerImpl::check_identifier(const ast::IdentifierExpr& expression) {
         if (auto* symbol = lookup_value(name); symbol != nullptr) {
             switch (symbol->kind) {
             case Symbol::Kind::Variable:
+                bind(expression, [&] {
+                    Binding binding;
+                    binding.kind = BindingKind::Variable;
+                    binding.type = symbol->type;
+                    binding.field = symbol->field;
+                    return binding;
+                }());
                 return symbol->type;
             case Symbol::Kind::Function:
+                bind(expression, [&] {
+                    Binding binding;
+                    binding.kind = BindingKind::Function;
+                    binding.function = symbol->function;
+                    binding.owner = symbol->function->owner;
+                    binding.receiver_type = symbol->receiver_type;
+                    return binding;
+                }());
                 return function_type(*symbol->function);
             case Symbol::Kind::EnumVariant:
+                bind(expression, [&] {
+                    Binding binding;
+                    binding.kind = BindingKind::EnumVariant;
+                    binding.variant = symbol->variant;
+                    binding.type = symbol->variant->value_type;
+                    return binding;
+                }());
                 return symbol->variant->value_type;
             }
         }
@@ -1723,13 +1665,28 @@ TypePtr CheckerImpl::check_identifier(const ast::IdentifierExpr& expression) {
     if (owner->kind == TypeSymbol::Kind::Enum) {
         const auto variant_it = owner->variants.find(member);
         if (variant_it != owner->variants.end()) {
-            const auto* variant = variant_it->second;
+            auto* variant = variant_it->second;
             if (!variant->payload.empty()) {
                 const auto method_it = owner->methods.find(member);
                 if (method_it != owner->methods.end()) {
+                    bind(expression, [&] {
+                        Binding binding;
+                        binding.kind = BindingKind::Function;
+                        binding.function = method_it->second;
+                        binding.owner = owner;
+                        return binding;
+                    }());
                     return function_type(*method_it->second);
                 }
             }
+            bind(expression, [&] {
+                Binding binding;
+                binding.kind = BindingKind::EnumVariant;
+                binding.variant = variant;
+                binding.owner = owner;
+                binding.type = variant->value_type;
+                return binding;
+            }());
             return variant->value_type;
         }
     }
@@ -1741,6 +1698,13 @@ TypePtr CheckerImpl::check_identifier(const ast::IdentifierExpr& expression) {
             error(expression.span, "method '" + member + "' requires an instance");
             return types::error();
         }
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Function;
+            binding.function = method_it->second;
+            binding.owner = owner;
+            return binding;
+        }());
         return function_type(*method_it->second);
     }
 
@@ -1768,7 +1732,17 @@ TypePtr CheckerImpl::check_member(const ast::MemberExpr& expression) {
         return types::error();
     }
 
-    if (TypePtr field_type; find_field(*type, object_type, expression.name, field_type)) {
+    FieldSymbol* field_symbol = nullptr;
+    if (TypePtr field_type;
+        find_field(*type, object_type, expression.name, field_type, field_symbol)) {
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Field;
+            binding.type = field_type;
+            binding.owner = type;
+            binding.field = field_symbol;
+            return binding;
+        }());
         return field_type;
     }
 
@@ -1778,6 +1752,14 @@ TypePtr CheckerImpl::check_member(const ast::MemberExpr& expression) {
             error(expression.span, "method '" + expression.name + "' requires a call");
             return types::error();
         }
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::StaticMethod;
+            binding.function = method.function;
+            binding.owner = method.owner;
+            binding.receiver_type = method.receiver_type;
+            return binding;
+        }());
         return function_type(*method.function);
     }
 
@@ -1810,6 +1792,14 @@ CheckerImpl::Callee CheckerImpl::resolve_callee(const ast::Expr& callee) {
                 result.function = symbol->function;
                 result.owner = symbol->function->owner;
                 result.receiver_type = symbol->receiver_type;
+                bind(*identifier, [&] {
+                    Binding binding;
+                    binding.kind = BindingKind::Function;
+                    binding.function = symbol->function;
+                    binding.owner = symbol->function->owner;
+                    binding.receiver_type = symbol->receiver_type;
+                    return binding;
+                }());
             } else if (symbol->kind == Symbol::Kind::Variable &&
                        symbol->type->kind == Type::Kind::Function) {
                 result.kind = Callee::Kind::Value;
@@ -1858,6 +1848,13 @@ CheckerImpl::Callee CheckerImpl::resolve_callee(const ast::Expr& callee) {
         result.kind = Callee::Kind::Function;
         result.function = function;
         result.owner = owner;
+        bind(*identifier, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Function;
+            binding.function = function;
+            binding.owner = owner;
+            return binding;
+        }());
         return result;
     }
 
@@ -1889,10 +1886,20 @@ CheckerImpl::Callee CheckerImpl::resolve_callee(const ast::Expr& callee) {
             result.function = found.function;
             result.owner = found.owner;
             result.receiver_type = found.receiver_type;
+            bind(*member, [&] {
+                Binding binding;
+                binding.kind = BindingKind::Function;
+                binding.function = found.function;
+                binding.owner = found.owner;
+                binding.receiver_type = found.receiver_type;
+                return binding;
+            }());
             return result;
         }
 
-        if (TypePtr field_type; find_field(*type, object_type, member->name, field_type)) {
+        FieldSymbol* field_symbol = nullptr;
+        if (TypePtr field_type; find_field(*type, object_type, member->name, field_type,
+                                           field_symbol)) {
             error(member->span, "'" + member->name + "' is a field, not a method");
             return {};
         }
@@ -2108,7 +2115,18 @@ TypePtr CheckerImpl::check_binary(const ast::BinaryExpr& expression) {
         return types::boolean();
     }
 
-    if (auto custom = find_operator(left, right, op); custom != nullptr) {
+    OperatorInfo* operator_info = nullptr;
+    TypeSymbol* operator_owner = nullptr;
+    if (auto custom = find_operator(left, right, op, operator_info, operator_owner);
+        custom != nullptr) {
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Operator;
+            binding.type = custom;
+            binding.op = operator_info;
+            binding.owner = operator_owner;
+            return binding;
+        }());
         return custom;
     }
 
@@ -2164,7 +2182,16 @@ TypePtr CheckerImpl::check_unary(const ast::UnaryExpr& expression) {
     }
 
     if (expression.op == "-" || expression.op == "+") {
-        if (auto custom = find_unary_operator(operand, expression.op); custom != nullptr) {
+        OperatorInfo* operator_info = nullptr;
+        if (auto custom = find_unary_operator(operand, expression.op, operator_info);
+            custom != nullptr) {
+            bind(expression, [&] {
+                Binding binding;
+                binding.kind = BindingKind::Operator;
+                binding.type = custom;
+                binding.op = operator_info;
+                return binding;
+            }());
             return custom;
         }
         if (operand->is_builtin(BuiltinType::Int) || operand->is_builtin(BuiltinType::Float)) {
@@ -2361,6 +2388,13 @@ TypePtr CheckerImpl::check_assignment_target(const ast::Expr& expression, bool& 
         }
 
         valid = true;
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Variable;
+            binding.type = symbol->type;
+            binding.field = symbol->field;
+            return binding;
+        }());
         return symbol->type;
     }
 
@@ -2384,8 +2418,18 @@ TypePtr CheckerImpl::check_assignment_target(const ast::Expr& expression, bool& 
             return types::error();
         }
 
-        if (TypePtr field_type; find_field(*type, object_type, member->name, field_type)) {
+        FieldSymbol* field_symbol = nullptr;
+        if (TypePtr field_type; find_field(*type, object_type, member->name, field_type,
+                                           field_symbol)) {
             valid = true;
+            bind(expression, [&] {
+                Binding binding;
+                binding.kind = BindingKind::Field;
+                binding.type = field_type;
+                binding.owner = type;
+                binding.field = field_symbol;
+                return binding;
+            }());
             return field_type;
         }
 
@@ -2447,7 +2491,14 @@ TypePtr CheckerImpl::check_expression(const ast::Expr& expression) {
     if (const auto* downcast = dynamic_cast<const ast::DowncastExpr*>(&expression)) {
         check_expression(*downcast->operand);
         if (downcast->target != nullptr) {
-            return resolve_type(*downcast->target);
+            const auto target = resolve_type(*downcast->target);
+            bind(*downcast, [&] {
+                Binding binding;
+                binding.kind = BindingKind::Downcast;
+                binding.type = target;
+                return binding;
+            }());
+            return target;
         }
         return types::error();
     }
@@ -2644,7 +2695,10 @@ bool CheckerImpl::is_condition_type(const TypePtr& type) const {
 }
 
 TypePtr CheckerImpl::find_operator(const TypePtr& left, const TypePtr& right,
-                                   const std::string& op) const {
+                                   const std::string& op, OperatorInfo*& operator_info,
+                                   TypeSymbol*& operator_owner) const {
+    operator_info = nullptr;
+    operator_owner = nullptr;
     auto search = [&](const TypePtr& candidate, const TypePtr& other) -> TypePtr {
         if (candidate == nullptr || candidate->kind != Type::Kind::Named) {
             return nullptr;
@@ -2654,13 +2708,15 @@ TypePtr CheckerImpl::find_operator(const TypePtr& left, const TypePtr& right,
             return nullptr;
         }
         const auto bindings = class_bindings(*type, candidate);
-        for (const auto& operator_info : type->operators) {
-            if (operator_info.op != op || operator_info.operands.size() != 2) {
+        for (auto& overload : type->operators) {
+            if (overload.op != op || overload.operands.size() != 2) {
                 continue;
             }
-            const auto operand = substitute(operator_info.operands[1], bindings);
+            const auto operand = substitute(overload.operands[1], bindings);
             if (is_assignable(other, operand)) {
-                return substitute(operator_info.result, bindings);
+                operator_info = &overload;
+                operator_owner = type;
+                return substitute(overload.result, bindings);
             }
         }
         return nullptr;
@@ -2672,7 +2728,9 @@ TypePtr CheckerImpl::find_operator(const TypePtr& left, const TypePtr& right,
     return search(right, left);
 }
 
-TypePtr CheckerImpl::find_unary_operator(const TypePtr& operand, const std::string& op) const {
+TypePtr CheckerImpl::find_unary_operator(const TypePtr& operand, const std::string& op,
+                                         OperatorInfo*& operator_info) const {
+    operator_info = nullptr;
     if (operand == nullptr || operand->kind != Type::Kind::Named) {
         return nullptr;
     }
@@ -2681,9 +2739,10 @@ TypePtr CheckerImpl::find_unary_operator(const TypePtr& operand, const std::stri
         return nullptr;
     }
     const auto bindings = class_bindings(*type, operand);
-    for (const auto& operator_info : type->operators) {
-        if (operator_info.op == op && operator_info.operands.size() == 1) {
-            return substitute(operator_info.result, bindings);
+    for (auto& overload : type->operators) {
+        if (overload.op == op && overload.operands.size() == 1) {
+            operator_info = &overload;
+            return substitute(overload.result, bindings);
         }
     }
     return nullptr;
@@ -2726,8 +2785,9 @@ Frontend& Frontend::operator=(Frontend&&) noexcept = default;
 bool Frontend::check_source(const std::string& module_name, const std::string& path,
                             std::string text) {
     const auto starting_errors = impl_->diagnostics.error_count();
-    CheckerImpl checker(impl_->host, impl_->diagnostics, impl_->loader);
-    checker.check(module_name, path, std::move(text));
+    auto checker = std::make_unique<CheckerImpl>(impl_->host, impl_->diagnostics, impl_->loader);
+    checker->check(module_name, path, std::move(text));
+    program_ = checker->take_program();
     return impl_->diagnostics.error_count() == starting_errors;
 }
 
