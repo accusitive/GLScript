@@ -99,6 +99,9 @@ struct CompiledProgram {
     std::vector<TypePtr> downcast_targets;
     std::unordered_map<const FunctionSymbol*, std::uint32_t> function_ids;
     std::unordered_map<std::string, std::uint32_t> module_inits; // module -> init function
+    // Top-level `handle Effect { ... }` declarations: ambient handlers
+    // installed for the whole entry-module execution.
+    std::unordered_map<std::string, std::vector<std::uint32_t>> module_ambient_handlers;
 
     const FunctionBytecode* function(std::uint32_t index) const {
         return &functions[index];

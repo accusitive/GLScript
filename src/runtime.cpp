@@ -9,10 +9,6 @@ namespace {
 
 constexpr const char* kInvalidDowncastOperation = "invalid_downcast";
 
-double as_number(const Value& value) {
-    return value.is_int() ? static_cast<double>(value.as_int()) : value.as_float();
-}
-
 std::string format_float(double value) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.10g", value);
@@ -109,6 +105,10 @@ Value Runtime::make_closure(std::uint32_t function, std::vector<Value> captures)
     return Value::heap(object);
 }
 
+const TypeSymbol* Runtime::find_type(const std::string& qualified_name) const {
+    return program_.find_type(qualified_name);
+}
+
 std::string Runtime::stringify(const Value& value) {
     if (value.is_unit()) {
         return "unit";
@@ -190,8 +190,7 @@ Value Runtime::run(const std::string& module_name, const std::string& function_n
 
     const auto init_it = bytecode_.module_inits.find(module_name);
     if (init_it != bytecode_.module_inits.end()) {
-        frames_.push_back(Frame{init_it->second, bytecode_.function(init_it->second), 0, 0,
-                                Value::unit()});
+        push_frame(init_it->second, 0, Value::unit());
         execute();
         stack_.clear();
         frames_.clear();
@@ -223,14 +222,25 @@ Value Runtime::run(const std::string& module_name, const std::string& function_n
     for (auto& argument : arguments) {
         stack_.push_back(argument);
     }
-    frames_.push_back(Frame{fn_it->second, bytecode_.function(fn_it->second), 0, 0,
-                            Value::unit()});
+    push_frame(fn_it->second, static_cast<std::uint32_t>(arguments.size()), Value::unit());
+
+    // Ambient `handle Effect { ... }` declarations delimit the whole entry
+    // function: a non-resuming handler case's value becomes the operation's
+    // result, and `resume` continues the script normally.
+    if (const auto ambient_it = bytecode_.module_ambient_handlers.find(module_name);
+        ambient_it != bytecode_.module_ambient_handlers.end()) {
+        for (const auto table : ambient_it->second) {
+            handlers_.push_back(HandlerFrame{table, 0,
+                                             static_cast<std::uint32_t>(stack_.size())});
+        }
+    }
+
     execute();
 
     return result_;
 }
 
-void Runtime::call_function(std::uint32_t index, std::uint32_t argc, Value closure) {
+void Runtime::push_frame(std::uint32_t index, std::uint32_t argc, Value closure) {
     Frame frame;
     frame.function = index;
     frame.fn = bytecode_.function(index);
@@ -238,6 +248,17 @@ void Runtime::call_function(std::uint32_t index, std::uint32_t argc, Value closu
     frame.base = static_cast<std::uint32_t>(stack_.size()) - argc;
     frame.closure = std::move(closure);
     frames_.push_back(std::move(frame));
+
+    // Reserve the frame's local slots; parameters (the topmost argc slots)
+    // already hold the call arguments.
+    const std::uint32_t total = frames_.back().fn->local_count;
+    while (stack_.size() < frames_.back().base + total) {
+        stack_.push_back(Value::unit());
+    }
+}
+
+void Runtime::call_function(std::uint32_t index, std::uint32_t argc, Value closure) {
+    push_frame(index, argc, std::move(closure));
 }
 
 bool Runtime::dispatch_host_call(const FunctionSymbol* function, std::uint32_t argc,
@@ -251,6 +272,10 @@ bool Runtime::dispatch_host_call(const FunctionSymbol* function, std::uint32_t a
     std::vector<Value> args(stack_.end() - argc, stack_.end());
     stack_.resize(stack_.size() - argc);
     stack_.push_back(function->host_call(*this, args));
+    if (function->aborting) {
+        runtime_error(span, "aborted by host operation '" + function->name + "'");
+        return false;
+    }
     return true;
 }
 
@@ -507,12 +532,7 @@ void Runtime::invoke_handler(const HandlerFrame& handler, const HandlerEntry& en
     frames_.resize(delimiter + 1);
     handlers_.resize(handler_index + 1);
 
-    Frame frame;
-    frame.function = entry.function;
-    frame.fn = bytecode_.function(entry.function);
-    frame.ip = 0;
-    frame.base = static_cast<std::uint32_t>(stack_.size()) - argc - 1;
-    frames_.push_back(frame);
+    push_frame(entry.function, argc + 1, Value::unit());
 }
 
 bool Runtime::resume_continuation(const Value& continuation_value, Value result) {
@@ -567,6 +587,11 @@ void Runtime::execute() {
         frame.ip = ip + 1 + static_cast<std::uint32_t>(operand_count(op));
         const SourceSpan span = frame.fn->spans[ip];
 
+        if (std::getenv("GLTRACE") != nullptr) {
+            std::fprintf(stderr, "ip=%u op=%d stack=%zu frames=%zu handlers=%zu\n", ip,
+                         static_cast<int>(op), stack_.size(), frames_.size(),
+                         handlers_.size());
+        }
         switch (op) {
         case Op::LoadConst:
             stack_.push_back(constants_[frame.function][operands[0]]);
@@ -576,9 +601,11 @@ void Runtime::execute() {
             stack_.push_back(stack_[frame.base + operands[0]]);
             break;
 
-        case Op::StoreLocal:
-            stack_[frame.base + operands[0]] = pop();
+        case Op::StoreLocal: {
+            const auto value = pop();
+            stack_[frame.base + operands[0]] = value;
             break;
+        }
 
         case Op::LoadCapture: {
             const auto* closure = as_closure(frame.closure);

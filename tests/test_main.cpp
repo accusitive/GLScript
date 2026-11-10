@@ -1,6 +1,8 @@
 #include "glscript/checker.hpp"
+#include "glscript/bytecode.hpp"
 #include "glscript/diagnostic.hpp"
 #include "glscript/host.hpp"
+#include "glscript/runtime.hpp"
 
 #include "engine_bindings.hpp"
 
@@ -71,6 +73,81 @@ void expect_error(const std::string& name, const std::string& source,
     const auto result = check_source(name, source, std::move(loader));
     if (result.ok || result.errors == 0) {
         fail(name, "expected a typecheck error, but the source was accepted");
+        return;
+    }
+    if (!expected_substring.empty() &&
+        result.diagnostics.find(expected_substring) == std::string::npos) {
+        fail(name, "diagnostics did not contain '" + expected_substring + "':\n" +
+                       result.diagnostics);
+        return;
+    }
+    pass(name);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime tests: typecheck, compile, execute, capture println output
+// ---------------------------------------------------------------------------
+
+struct RunResult {
+    bool ran = false;
+    std::string diagnostics;
+    std::string output;
+};
+
+std::string trim(std::string text) {
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    return text;
+}
+
+RunResult run_source(const std::string& name, const std::string& source,
+                     glscript::ModuleLoader loader = {}) {
+    glscript::HostRegistry host;
+    RunResult result;
+    glscript::register_engine_bindings(host, [&](const std::string& line) {
+        result.output += line;
+        result.output += "\n";
+    });
+
+    glscript::DiagnosticSink diagnostics;
+    glscript::Frontend frontend(host, diagnostics, std::move(loader));
+    if (!frontend.check_source(name, name + ".gl", source)) {
+        result.diagnostics = diagnostics.format();
+        return result;
+    }
+
+    const auto& program = frontend.program();
+    auto bytecode = glscript::compile_program(program);
+    glscript::Runtime runtime(program, bytecode, host, diagnostics);
+    runtime.run(name, "main");
+
+    result.diagnostics = diagnostics.format();
+    result.ran = !diagnostics.has_errors();
+    return result;
+}
+
+void expect_run(const std::string& name, const std::string& source,
+                const std::string& expected_output,
+                glscript::ModuleLoader loader = {}) {
+    const auto result = run_source(name, source, std::move(loader));
+    if (!result.ran) {
+        fail(name, result.diagnostics.empty() ? "run failed" : result.diagnostics);
+        return;
+    }
+    if (trim(result.output) != trim(expected_output)) {
+        fail(name, "output mismatch:\n  expected: [" + trim(expected_output) +
+                       "]\n  actual:   [" + trim(result.output) + "]");
+        return;
+    }
+    pass(name);
+}
+
+void expect_run_error(const std::string& name, const std::string& source,
+                      const std::string& expected_substring) {
+    const auto result = run_source(name, source);
+    if (result.ran) {
+        fail(name, "expected a runtime error, but the script ran cleanly");
         return;
     }
     if (!expected_substring.empty() &&
@@ -323,9 +400,311 @@ void test_sketch_files_on_disk() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Runtime tests
+// ---------------------------------------------------------------------------
+
+void test_run_arithmetic() {
+    expect_run("run_arithmetic", R"GL(
+function main() {
+    println(`sum=${1 + 2} float=${1.5f + 2.5f} mix=${1 + 2 * 3}`);
+    println(`div=${10 / 4} fdiv=${10.0f / 4.0f} mod=${17 % 5}`);
+    println(`neg=${-(3 + 4)}`);
+}
+)GL",
+              "sum=3 float=4 mix=7\ndiv=2 fdiv=2.5 mod=2\nneg=-7");
+}
+
+void test_run_strings() {
+    expect_run("run_strings", R"GL(
+function main() {
+    String greeting = "he" + "llo";
+    int count = 2;
+    println(greeting + ` x${count}`);
+}
+)GL",
+              "hello x2");
+}
+
+void test_run_control_flow() {
+    expect_run("run_control_flow", R"GL(
+function main() {
+    int total = 0;
+    int i = 0;
+    while (i < 10) {
+        i = i + 1;
+        if (i == 3) {
+            continue;
+        }
+        if (i > 7) {
+            break;
+        }
+        total = total + i;
+    }
+    println(`total=${total}`);
+    if (total == 25) {
+        println("odd sum correct");
+    } else {
+        println("unexpected");
+    }
+}
+)GL",
+              "total=25\nodd sum correct");
+}
+
+void test_run_recursion() {
+    expect_run("run_recursion", R"GL(
+function fib(n: int) -> int {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function main() {
+    println(`fib(10)=${fib(10)}`);
+}
+)GL",
+              "fib(10)=55");
+}
+
+void test_run_closures() {
+    expect_run("run_closures", R"GL(
+function adder(offset: int) -> int {
+    return ((x: int) => x + offset)(5);
+}
+
+function nested() -> int {
+    int outer = 10;
+    return ((y: int) => ((x: int) => x + y + outer)(2))(1);
+}
+
+function main() {
+    println(`adder=${adder(3)}`);
+    println(`nested=${nested()}`);
+}
+)GL",
+              "adder=8\nnested=13");
+}
+
+void test_run_enums() {
+    expect_run("run_enums", R"GL(
+enum Color {
+    Red,
+    Green,
+}
+
+enum Expr {
+    Const(int),
+    Pair(int, int),
+}
+
+function main() {
+    Color c = Color::Green;
+    if (c == Color::Green) {
+        println("green");
+    }
+    Expr e = Expr::Const(7);
+    println(`${e}`);
+    Expr p = Expr::Pair(1, 2);
+    if (e == Expr::Const(7)) {
+        println("const match");
+    }
+    println(`${p}`);
+}
+)GL",
+              "green\nConst(7)\nconst match\nPair(1, 2)");
+}
+
+void test_run_dynamic_downcast() {
+    expect_run("run_dynamic_downcast", R"GL(
+function main() {
+    dynamic value = 100;
+    int number = downcast::<int> value;
+    dynamic text = "hello";
+    String message = downcast::<String> text;
+    println(`n=${number} s=${message}`);
+}
+)GL",
+              "n=100 s=hello");
+}
+
+void test_run_downcast_error() {
+    expect_run_error("run_downcast_error", R"GL(
+function main() {
+    dynamic value = 100;
+    String text = downcast::<String> value;
+    println(text);
+}
+)GL",
+                     "invalid_downcast");
+}
+
+void test_run_handler() {
+    expect_run("run_handler", R"GL(
+effect Counter {
+    operation count(): int;
+}
+
+function work(total: int) -> int {
+    return total + count() + count();
+}
+
+function main() {
+    int result = handle (work(10)) with {
+        Counter::count() -> int {
+            resume(5);
+        }
+    };
+    println(`result=${result}`);
+}
+)GL",
+              "result=20");
+}
+
+void test_run_multi_shot() {
+    // The same continuation is resumed twice by one handler activation:
+    // the body re-runs from the raise point both times.
+    expect_run("run_multi_shot", R"GL(
+effect Counter {
+    operation count(): int;
+}
+
+function main() {
+    int result = handle (count() + count()) with {
+        Counter::count() -> int {
+            resume(1) + resume(2);
+        }
+    };
+    println(`result=${result}`);
+}
+)GL",
+              "result=4");
+}
+
+void test_run_nested_handlers() {
+    expect_run("run_nested_handlers", R"GL(
+effect A {
+    operation a(): int;
+}
+effect B {
+    operation b(): int;
+}
+
+function inner(): int {
+    return a() * 10 + b();
+}
+
+function main() {
+    int result = handle (handle (inner()) with {
+        B::b() -> int {
+            resume(3);
+        }
+    }) with {
+        A::a() -> int {
+            resume(4);
+        }
+    };
+    println(`result=${result}`);
+}
+)GL",
+              "result=43");
+}
+
+void test_run_ambient_handler() {
+    // A top-level `handle Effect { ... }` is installed for the whole script;
+    // a non-resuming case's value becomes the operation result.
+    expect_run("run_ambient_handler", R"GL(
+effect Noise {
+    operation ping(): int;
+}
+
+handle Noise {
+    function ping() -> int {
+        42
+    }
+}
+
+function main() {
+    println(`ping=${ping()}`);
+}
+)GL",
+              "ping=42");
+}
+
+void test_run_unhandled_op() {
+    expect_run_error("run_unhandled_op", R"GL(
+effect Counter {
+    operation count(): int;
+}
+
+function main() {
+    int x = count();
+    println(`${x}`);
+}
+)GL",
+                     "unhandled operation");
+}
+
+void test_run_handler_decl_evaluates_body() {
+    expect_run("run_handler_decl_body", R"GL(
+effect Counter {
+    operation count(): int;
+}
+
+handle (count() + count()) with {
+    Counter::count() -> int {
+        resume(10);
+    }
+}
+
+function main() {
+    println("main ran");
+}
+)GL",
+              "main ran");
+}
+
+void test_run_host_calls() {
+    expect_run("run_host_calls", R"GL(
+import input::{Input, Axis};
+import math::Vector3;
+
+function main() {
+    float axis = Input::get_axis(Axis::Horizontal);
+    Vector3<float> v = Vector3::new(1.0f, 2.0f, 3.0f);
+    Vector3<float> scaled = v * 2.0f;
+    Vector3<float> shifted = v + Vector3::new(10.0f, 20.0f, 30.0f);
+    println(`axis=${axis}`);
+    println(`scaled=${scaled.x} ${scaled.y} ${scaled.z}`);
+    println(`shifted=${shifted.x} ${shifted.y} ${shifted.z}`);
+    println(`dt=${dt()}`);
+    println(`script=${get_script_name()}`);
+}
+)GL",
+              "axis=1\nscaled=2 4 6\nshifted=11 22 33\ndt=0.016\nscript=script");
+}
+
+void test_run_string_allocation_gc() {
+    // Enough allocations to trigger several collections.
+    expect_run("run_gc", R"GL(
+function main() {
+    int i = 0;
+    while (i < 3000) {
+        String temp = `row ${i} padding ${i * 2}`;
+        i = i + 1;
+    }
+    println("survived 3000 allocations");
+}
+)GL",
+              "survived 3000 allocations");
+}
+
 } // namespace
 
-int main() {
+int main() {  // NOLINT(readability-function-size)
+
     test_entity_sketch();
     test_runtime_sketch();
     test_unknown_identifier();
@@ -344,6 +723,23 @@ int main() {
     test_control_flow();
     test_assignment_type_error();
     test_sketch_files_on_disk();
+
+    test_run_arithmetic();
+    test_run_strings();
+    test_run_control_flow();
+    test_run_recursion();
+    test_run_closures();
+    test_run_enums();
+    test_run_dynamic_downcast();
+    test_run_downcast_error();
+    test_run_handler();
+    test_run_multi_shot();
+    test_run_nested_handlers();
+    test_run_ambient_handler();
+    test_run_unhandled_op();
+    test_run_handler_decl_evaluates_body();
+    test_run_host_calls();
+    test_run_string_allocation_gc();
 
     std::cout << "\n" << passes << " passed, " << failures << " failed\n";
     return failures == 0 ? 0 : 1;

@@ -40,6 +40,9 @@ public:
     // Renders any value as a string (template strings, concat, println).
     std::string stringify(const Value& value);
 
+    // Looks up a checked type by qualified name (for host thunks).
+    const TypeSymbol* find_type(const std::string& qualified_name) const;
+
 private:
     struct Frame {
         std::uint32_t function = 0;
@@ -56,6 +59,7 @@ private:
     };
 
     void execute();
+    void push_frame(std::uint32_t index, std::uint32_t argc, Value closure);
     void call_function(std::uint32_t index, std::uint32_t argc, Value closure);
     void raise_effect(const std::string& effect, const std::string& operation,
                       std::uint32_t argc, const SourceSpan& span);

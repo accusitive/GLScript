@@ -71,9 +71,6 @@ std::size_t operand_count_impl(Op op) {
     case Op::JumpIfTrue:
     case Op::Loop:
     case Op::Call:
-    case Op::CallFunction:
-    case Op::CallHost:
-    case Op::CallOperator:
     case Op::PushHandler:
     case Op::EnumVariant:
     case Op::GetField:
@@ -83,6 +80,10 @@ std::size_t operand_count_impl(Op op) {
     case Op::Downcast:
     case Op::BuildString:
         return 1;
+    case Op::CallFunction:
+    case Op::CallHost:
+    case Op::CallOperator:
+        return 2;
     case Op::Closure:
     case Op::EnumCtor:
         return 2;
@@ -295,15 +296,28 @@ private:
         return fn_index;
     }
 
-    // Module init: evaluates top-level `handle ... with { ... }` declarations.
+    // Module init evaluates `handle <expr> with { ... }` declarations;
+    // expression-less `handle Effect { ... }` declarations become ambient
+    // handlers installed for the module's whole execution.
     void compile_module_init(const ModuleInfo& module) {
-        bool has_handler = false;
         for (const auto& declaration : module.unit->declarations) {
-            if (dynamic_cast<const ast::HandlerDecl*>(declaration.get()) != nullptr) {
-                has_handler = true;
+            const auto* handler_decl = dynamic_cast<const ast::HandlerDecl*>(declaration.get());
+            if (handler_decl == nullptr || handler_decl->handled_expression != nullptr) {
+                continue;
+            }
+            const auto table =
+                register_handler_table(handler_decl->effect, handler_decl->cases);
+            output_.module_ambient_handlers[module.name].push_back(table);
+        }
+
+        bool has_init = false;
+        for (const auto& declaration : module.unit->declarations) {
+            const auto* handler_decl = dynamic_cast<const ast::HandlerDecl*>(declaration.get());
+            if (handler_decl != nullptr && handler_decl->handled_expression != nullptr) {
+                has_init = true;
             }
         }
-        if (!has_handler) {
+        if (!has_init) {
             return;
         }
 
@@ -906,6 +920,9 @@ private:
         }
 
         if (function->is_effect_operation) {
+            if (function->is_host) {
+                host_function_id(function); // registered for the unhandled-op fallback
+            }
             compile_arguments();
             emit(Op::Raise, call.span);
             emit_word(make_constant(Constant{

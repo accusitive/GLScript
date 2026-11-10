@@ -2245,6 +2245,22 @@ TypePtr CheckerImpl::check_lambda(const ast::LambdaExpr& expression) {
 
     if (expression.body != nullptr) {
         check_statement(*expression.body);
+
+        // Infer the result from a trailing expression when none is declared.
+        if (expression.return_type == nullptr) {
+            const auto* body_block =
+                dynamic_cast<const ast::BlockStmt*>(expression.body.get());
+            if (body_block != nullptr && !body_block->statements.empty()) {
+                if (const auto* tail = dynamic_cast<const ast::ExprStmt*>(
+                        body_block->statements.back().get());
+                    tail != nullptr && tail->expression != nullptr) {
+                    result = check_expression(*tail->expression);
+                    if (result->is_builtin(BuiltinType::Never)) {
+                        result = types::unit();
+                    }
+                }
+            }
+        }
     }
 
     current_scope_ = saved_scope;

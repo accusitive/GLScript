@@ -64,6 +64,11 @@ struct Value {
 // the thunk and outlives the runtime.
 using HostCall = std::function<Value(Runtime& runtime, std::vector<Value>& args)>;
 
+// Numeric view of a scalar value (int widens to double).
+inline double as_number(const Value& value) {
+    return value.is_int() ? static_cast<double>(value.as_int()) : value.as_float();
+}
+
 // ---------------------------------------------------------------------------
 // GC objects
 // ---------------------------------------------------------------------------
