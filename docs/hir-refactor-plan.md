@@ -1,6 +1,7 @@
 # HIR refactor plan: AST → typed HIR → bytecode
 
 Status: **implemented** (landed 2026-11-10; §8 steps 1–6 done, deviations below).
+Current project state: see [status.md](status.md).
 
 Deviations from the original design, kept for behavior-identical output:
 - Tail-expression returns apply to *all* block bodies (§2.3.3 said regular

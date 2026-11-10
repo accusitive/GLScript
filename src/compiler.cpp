@@ -327,9 +327,12 @@ private:
         case hir::Expr::Kind::Call:
             emit_call_arguments(expression);
             if (expression.call_target == hir::Expr::CallTarget::HostFn) {
+                // The receiver is part of the thunk's argument list.
                 emit_instruction(Op::CallHost, expression.span,
                                  {expression.fn_id,
-                                  static_cast<std::uint32_t>(expression.args.size())});
+                                  static_cast<std::uint32_t>(
+                                      expression.args.size() +
+                                      (expression.receiver != nullptr ? 1u : 0u))});
             } else {
                 emit_instruction(Op::CallFunction, expression.span,
                                  {expression.fn_id,

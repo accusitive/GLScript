@@ -1,0 +1,33 @@
+import game::{Entity, Vec2};
+
+// One glscript invocation per entity per frame: apply gravity, integrate,
+// and bounce off the floor and walls. The C++ host (examples/entt/entt_demo.cpp)
+// only stores state in the EnTT registry and renders it with raylib — all
+// simulation logic lives here.
+function update(e: Entity, dt: float) {
+    Vec2 v = e.velocity();
+    Vec2 p = e.position();
+
+    // gravity
+    v.y = v.y + 220.0f * dt;
+
+    // integrate
+    p = p + v * dt;
+
+    // floor bounce
+    if (p.y > 380.0f) {
+        p.y = 380.0f;
+        v.y = -v.y * 0.78f;
+    }
+
+    // wall bounce
+    if (p.x < 24.0f && v.x < 0.0f) {
+        v.x = -v.x * 0.88f;
+    }
+    if (p.x > 776.0f && v.x > 0.0f) {
+        v.x = -v.x * 0.88f;
+    }
+
+    e.set_velocity(v);
+    e.set_position(p);
+}

@@ -80,18 +80,38 @@ if(GLSCRIPT_BUILD_ENTT_EXAMPLE)
 
     if(_entt_include_dir)
         add_executable(entt_demo
-            examples/entt/entt_demo.cpp)
+            examples/entt/entt_demo.cpp
+            examples/engine_bindings.cpp)
 
         target_include_directories(entt_demo PRIVATE
             ${_entt_include_dir}
             ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 
         target_compile_definitions(entt_demo PRIVATE
-            GLSCRIPT_ENTT_DEMO_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/entt/entt_demo.gl")
+            GLSCRIPT_ENTT_DEMO_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/entt/gravity.gl")
 
         target_link_libraries(entt_demo PRIVATE glscript)
 
-        add_test(NAME entt_demo COMMAND entt_demo)
+        # Rendering: system raylib when installed, otherwise a local build
+        # fetched into the build directory. (raylib's installed config
+        # exports the target as `raylib`.)
+        find_package(raylib QUIET)
+        if(raylib_FOUND)
+            target_link_libraries(entt_demo PRIVATE raylib)
+        else()
+            include(FetchContent)
+            set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+            set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+            FetchContent_Declare(raylib
+                URL https://github.com/raysan5/raylib/archive/refs/tags/6.0.tar.gz)
+            FetchContent_MakeAvailable(raylib)
+            target_link_libraries(entt_demo PRIVATE raylib)
+        endif()
+        target_compile_definitions(entt_demo PRIVATE GLSCRIPT_HAVE_RAYLIB)
+
+        # Headless run: the physics is fully scripted, so this exercises the
+        # runtime end to end without opening a window.
+        add_test(NAME entt_demo COMMAND entt_demo --headless 240)
     endif()
 endif()
 
