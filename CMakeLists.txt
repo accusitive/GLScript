@@ -22,7 +22,8 @@ add_library(glscript
     src/parser.cpp
     src/type.cpp
     src/host.cpp
-    src/checker.cpp)
+    src/checker.cpp
+    src/value.cpp)
 
 target_include_directories(glscript
     PUBLIC
