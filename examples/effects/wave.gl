@@ -1,0 +1,132 @@
+// ---------------------------------------------------------------------------
+// The effects showcase: one battle script, many rulebooks.
+//
+// `wave()` below is written ONCE, in terms of *intents*: it swings at foes
+// through the Combat::damage effect and narrates through the engine's global
+// println effect. It never decides what a blow means or where narration goes.
+//
+// Each play_* function runs the very same wave() under a different handler
+// stack — a different rulebook — and the battle comes out differently:
+//
+//   play_normal    blows land as swung; narration falls through to the host
+//   play_armored   the handler halves every blow; the logic sees the change
+//   play_god       the handler lands nothing; the logic narrates the glancing
+//   play_layered   the strike layer delegates to an armor layer via a second
+//                  effect and comments on what the armor soaked
+//   play_quiet     narration is re-routed to the host's log with a prefix;
+//                  the battle itself is untouched
+//   play_surrender the handler never resumes: the wave is cut short where it
+//                  stands — non-resuming cases abandon the computation
+// ---------------------------------------------------------------------------
+
+// Striking a foe: the logic states how hard it swings; the handler decides
+// what actually lands. The operation's result is the damage dealt, and the
+// logic reacts to it.
+effect Combat {
+    function damage(target: String, amount: float) -> float;
+}
+
+// The armor layer that play_layered installs underneath the strike layer.
+effect Armor {
+    function absorb(target: String, amount: float) -> float;
+}
+
+// ---------------------------------------------------------------------------
+// The battle logic.
+// ---------------------------------------------------------------------------
+
+function strike(hero: String, foe: String) {
+    float dealt = Combat::damage(foe, 12.0f);
+    if (dealt < 1.0f) {
+        println(`${hero}'s strike glances off ${foe} harmlessly`);
+    } else {
+        println(`${hero} hits ${foe} for ${dealt}`);
+    }
+}
+
+function wave() {
+    println("-- the wave approaches --");
+    strike("hero", "goblin");
+    strike("hero", "orc");
+    println("-- the wave falls --");
+}
+
+// ---------------------------------------------------------------------------
+// The rulebooks.
+// ---------------------------------------------------------------------------
+
+// Blows land exactly as swung. No Combat handler output is interesting here —
+// narration falls through to the host's println thunk.
+function play_normal() {
+    handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            resume(amount);
+        }
+    };
+}
+
+// The foes are armored: the handler rewrites every blow on its way in, and
+// the logic's narration shows the difference without knowing why.
+function play_armored() {
+    handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            resume(amount * 0.5f);
+        }
+    };
+}
+
+// God mode: the handler lands nothing. The wave still runs to completion —
+// it just watches every strike glance off.
+function play_god() {
+    handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            resume(0.0f);
+        }
+    };
+}
+
+// Layered interpretation: the strike layer does not know the foes are
+// armored. It forwards the blow through a second effect, comments on what
+// came back, and lets the (transformed) damage continue to the wave.
+function play_layered() {
+    handle (handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            float after = Armor::absorb(target, amount);
+            if (after < amount) {
+                println(`(${target}'s armor soaks ${amount - after})`);
+            }
+            resume(after);
+        }
+    }) with {
+        Armor::absorb(target: String, amount: float) -> float {
+            resume(amount * 0.5f);
+        }
+    };
+}
+
+// Quiet mode: narration is re-routed to the host's log with a prefix (log
+// has no handler here, so it falls through to the host thunk), while the
+// battle runs untouched under its pass-through Combat handler.
+function play_quiet() {
+    handle (handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            resume(amount);
+        }
+    }) with {
+        println(message: String) -> unit {
+            log(`[quiet] ${message}`);
+            resume;
+        }
+    };
+}
+
+// Surrender: the handler never resumes, so the handled computation is
+// abandoned right where it stands — the rest of the wave never happens.
+function play_surrender() {
+    handle (wave()) with {
+        Combat::damage(target: String, amount: float) -> float {
+            println("the hero surrenders at the first blow!");
+            return 0.0f;
+        }
+    };
+}

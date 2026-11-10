@@ -2307,8 +2307,37 @@ TypePtr CheckerImpl::check_handler_case(const ast::HandlerCase& handler_case,
     }
 
     if (effect == nullptr) {
-        error(handler_case.span, "handler case has no effect");
-        return types::error();
+        // A case written as a bare operation name matches that operation in
+        // any global effect — mirroring the runtime's matcher, which treats
+        // an unnamed case as matching regardless of effect.
+        for (auto& module_entry : modules_) {
+            auto& candidate_module = *module_entry.second;
+            if (!candidate_module.is_host) {
+                continue;
+            }
+            for (auto& type_entry : candidate_module.types) {
+                TypeSymbol* candidate = type_entry.second;
+                if (candidate->kind != TypeSymbol::Kind::Effect || !candidate->global) {
+                    continue;
+                }
+                const auto operation = candidate->methods.find(handler_case.operation);
+                if (operation == candidate->methods.end() ||
+                    !operation->second->is_effect_operation) {
+                    continue;
+                }
+                if (effect != nullptr && effect != candidate) {
+                    error(handler_case.span,
+                          "operation '" + handler_case.operation +
+                              "' is ambiguous; name the effect in the handler case");
+                    return types::error();
+                }
+                effect = candidate;
+            }
+        }
+        if (effect == nullptr) {
+            error(handler_case.span, "handler case has no effect");
+            return types::error();
+        }
     }
     if (effect->kind != TypeSymbol::Kind::Effect) {
         error(handler_case.span, "'" + effect->qualified_name + "' is not an effect");
@@ -2341,7 +2370,9 @@ TypePtr CheckerImpl::check_handler_case(const ast::HandlerCase& handler_case,
     const auto saved_loop_depth = loop_depth_;
     auto* handler_scope = make_scope(saved_scope);
     current_scope_ = handler_scope;
-    current_result_ = handler_result;
+    // A `return` inside a handler case produces the operation's result (the
+    // value delivered at the raise site when the case does not resume).
+    current_result_ = operation.result;
     loop_depth_ = 0;
 
     for (std::size_t i = 0; i < handler_case.parameters.size(); ++i) {

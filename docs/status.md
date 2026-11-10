@@ -26,6 +26,10 @@ plus the entt_demo build test.
 - **Runtime infrastructure**: mark-sweep GC with continuation rooting,
   host-call bridge, per-instruction span tracking, and an
   `emit`/`operand_count` single-source assert in the emitter.
+- **Effects showcase**: `examples/effects/wave.gl` runs one battle script
+  under six handler stacks (pass-through, damage transformation, god mode,
+  layered delegation via a second effect, narration re-routing, non-resuming
+  abort) — `wave_demo` prints the transcripts and is a ctest.
 - **Tooling**: `glc --dump-hir` prints a readable per-function IR dump —
   the debugging surface the HIR refactor exists for.
 
@@ -38,7 +42,7 @@ plus the entt_demo build test.
 | **Multi-shot semantics** | `resume` is tail-position: code after a non-identity resume in the handler is dead. One activation cannot resume twice *and* use both completions at the outer level. (True recursive multi-shot — the canonical algebraic reading — would give 48, not 4, for the multi-shot test script; the implemented semantics match the committed tests.) |
 | **`glc` can't run scripts** | `glc` checks and dumps HIR only; no `-r`/run mode and no bytecode output. Running requires the C++ API. |
 | **entt_demo** | Runs a gravity sim: 12 EnTT bodies, one scripted `update(entity, dt)` invocation per entity per frame (gravity, integration, floor/wall bounce all in glscript), rendered with raylib. `--headless N` runs without a window and is what ctest exercises. |
-| **Edge cases** | `handle` *inside* a handler case + resume from within is untested; handler-case bodies that `PushHandler` then transfer-resume leave stale delimiters (safe cleanup added, but untested). |
+| **Edge cases** | `handle` *inside* a handler case + resume from within is untested; handler-case bodies that `PushHandler` then transfer-resume leave stale delimiters (safe cleanup added, but untested). Single-name handler cases in `handle` expressions resolve only against global host effects (ambiguity across effects is a checker error). |
 | **Continuation GC roots** | `Runtime::continuations_` grows monotonically — freed only when the Runtime dies. Fine for scripts, worth a pool for long-lived engines. |
 | **Dead AST** | `ast::IfExpr` exists but the parser never produces it (only `if` *statements*); lowering handles it defensively as unit. |
 | **Open roadmap items** | serialize metadata export, generic enum shorthand, recursive generic types, richer operator overloading, collection operations (README "Near-term work"). |

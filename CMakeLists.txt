@@ -118,7 +118,6 @@ endif()
 add_executable(glscript_tests
     tests/test_main.cpp
     examples/engine_bindings.cpp)
-
 target_include_directories(glscript_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 
@@ -128,3 +127,18 @@ target_compile_definitions(glscript_tests PRIVATE
 target_link_libraries(glscript_tests PRIVATE glscript)
 
 add_test(NAME glscript_tests COMMAND glscript_tests)
+
+add_executable(wave_demo
+    examples/effects/wave_demo.cpp
+    examples/engine_bindings.cpp)
+
+target_include_directories(wave_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+target_compile_definitions(wave_demo PRIVATE
+    GLSCRIPT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+target_link_libraries(wave_demo PRIVATE glscript)
+
+add_test(NAME wave_demo
+         COMMAND wave_demo ${CMAKE_CURRENT_SOURCE_DIR}/examples/effects/wave.gl)
