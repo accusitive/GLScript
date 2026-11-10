@@ -1,6 +1,7 @@
 #include "glscript/checker.hpp"
 #include "glscript/diagnostic.hpp"
 #include "glscript/host.hpp"
+#include "glscript/hir.hpp"
 
 #include "engine_bindings.hpp"
 
@@ -18,6 +19,7 @@ namespace {
 struct Options {
     std::string file;
     std::vector<std::string> module_paths;
+    bool dump_hir = false;
     bool help = false;
 };
 
@@ -26,6 +28,7 @@ void print_usage(std::ostream& output) {
            << "Usage: glc [options] <file.gl>\n\n"
            << "Options:\n"
            << "  -I <dir>      Add a module search directory\n"
+           << "  --dump-hir    Print the lowered HIR after a successful check\n"
            << "  -h, --help    Show this help\n";
 }
 
@@ -45,6 +48,11 @@ bool parse_args(int argc, char** argv, Options& options) {
 
         if (argument == "-h" || argument == "--help") {
             options.help = true;
+            continue;
+        }
+
+        if (argument == "--dump-hir") {
+            options.dump_hir = true;
             continue;
         }
 
@@ -154,6 +162,12 @@ int main(int argc, char** argv) {
     if (!ok) {
         std::cerr << "glc: typecheck failed for " << root_path.string() << '\n';
         return 1;
+    }
+
+    if (options.dump_hir) {
+        const auto lowered = glscript::hir::lower(frontend.program());
+        glscript::hir::dump(lowered, std::cout);
+        return 0;
     }
 
     std::cout << "glc: checked " << root_path.string() << " successfully ("

@@ -1,6 +1,16 @@
 # HIR refactor plan: AST → typed HIR → bytecode
 
-Status: **plan only — not implemented** (agreed 2026-11-10).
+Status: **implemented** (landed 2026-11-10; §8 steps 1–6 done, deviations below).
+
+Deviations from the original design, kept for behavior-identical output:
+- Tail-expression returns apply to *all* block bodies (§2.3.3 said regular
+  functions keep implicit-unit returns — that would have broken
+  `function f() -> int { 42; }`).
+- `Handle` and `Abort` are expression kinds (they compile in expression
+  position today), not statement kinds (§2.3 listed them as statements).
+- Module-init handle emission order is PopHandler-then-Pop instead of
+  Pop-then-PopHandler — behaviorally equivalent.
+- `HandlerTable::return_ip` was already gone from bytecode.hpp.
 
 ## 1. Why
 

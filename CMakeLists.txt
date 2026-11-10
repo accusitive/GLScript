@@ -23,6 +23,8 @@ add_library(glscript
     src/type.cpp
     src/host.cpp
     src/checker.cpp
+    src/lower.cpp
+    src/hir_dump.cpp
     src/value.cpp
     src/compiler.cpp
     src/runtime.cpp)

@@ -177,6 +177,7 @@ include/glscript/   public headers
   ast.hpp           AST node definitions
   checker.hpp       Frontend, ModuleSource, ModuleLoader
   diagnostic.hpp    diagnostics with source snippets
+  hir.hpp           typed HIR: lowering output, emit() and dump() entry points
   host.hpp          C++ host registration API
   lexer.hpp         tokenization
   parser.hpp        parser entry points
@@ -184,6 +185,9 @@ include/glscript/   public headers
   token.hpp         token definitions
   type.hpp          semantic types
 src/                implementation
+  lower.cpp         checker AST + bindings -> HIR (resolution + desugaring)
+  hir_dump.cpp      HIR printer (glc --dump-hir)
+  compiler.cpp      HIR -> bytecode emitter
 examples/           example engine bindings
 examples/entt/      EnTT integration demo and its glscript script
 tools/glc.cpp       command-line typechecker
