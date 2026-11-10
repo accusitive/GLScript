@@ -248,6 +248,7 @@ private:
 
         FuncState state;
         state.fn_index = it->second;
+        state.enclosing = state_;
         state.receiver_type = receiver;
         state.scopes.emplace_back();
         state_ = &state;
@@ -275,6 +276,7 @@ private:
 
         FuncState state;
         state.fn_index = fn_index;
+        state.enclosing = state_;
         state.scopes.emplace_back();
         state_ = &state;
         FunctionBytecode& fn = this->fn();
@@ -325,6 +327,7 @@ private:
 
         FuncState state;
         state.fn_index = fn_index;
+        state.enclosing = state_;
         state.scopes.emplace_back();
         state_ = &state;
 
@@ -335,9 +338,12 @@ private:
             }
             const auto table =
                 register_handler_table(handler_decl->effect, handler_decl->cases);
+            const auto body_fn = compile_handle_body(*handler_decl->handled_expression);
             emit(Op::PushHandler, handler_decl->span);
             emit_word(table);
-            compile_expression(*handler_decl->handled_expression);
+            emit(Op::CallFunction, handler_decl->span);
+            emit_word(body_fn);
+            emit_word(0);
             emit(Op::Pop, handler_decl->span);
             emit(Op::PopHandler, handler_decl->span);
         }
@@ -346,6 +352,27 @@ private:
         emit(Op::Return, {});
         state_ = state.enclosing;
         output_.module_inits[module.name] = fn_index;
+    }
+
+    // Handled bodies compile as their own function so that a raise inside
+    // them is always exactly one frame above the handler's delimiter: the
+    // captured continuation ends at the body's Return, and the delimiter
+    // frame receives the handler's value as the value of the whole `handle`
+    // expression.
+    std::uint32_t compile_handle_body(const ast::Expr& body) {
+        const auto fn_index = new_function("(handle body)", "(handle body)");
+
+        FuncState state;
+        state.fn_index = fn_index;
+        state.enclosing = state_;
+        state.scopes.emplace_back();
+        state_ = &state;
+
+        compile_expression(body);
+        emit(Op::Return, body.span);
+
+        state_ = state.enclosing;
+        return fn_index;
     }
 
     std::uint32_t register_handler_table(const std::string& effect,
@@ -681,9 +708,12 @@ private:
 
         if (const auto* handle = dynamic_cast<const ast::HandleExpr*>(&expression)) {
             const auto table = register_handler_table("", handle->cases);
+            const auto body_fn = compile_handle_body(*handle->body);
             emit(Op::PushHandler, handle->span);
             emit_word(table);
-            compile_expression(*handle->body);
+            emit(Op::CallFunction, handle->span);
+            emit_word(body_fn);
+            emit_word(0);
             emit(Op::PopHandler, handle->span);
             return;
         }

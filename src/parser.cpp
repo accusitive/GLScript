@@ -543,6 +543,7 @@ ast::DeclPtr Parser::parse_effect(ast::Visibility visibility,
         }
 
         error(current(), "expected effect operation");
+        advance();
         synchronize_top_level();
     }
 
@@ -677,6 +678,7 @@ ast::HandlerCase Parser::parse_handler_case() {
 
     auto path = parse_path();
     if (path.empty()) {
+        advance();
         synchronize_top_level();
         return handler_case;
     }
@@ -710,7 +712,11 @@ std::vector<ast::HandlerCase> Parser::parse_handler_cases() {
         if (match(TokenKind::Semicolon)) {
             continue;
         }
+        const auto before = index_;
         cases.push_back(parse_handler_case());
+        if (index_ == before) {
+            advance(); // guarantee progress on malformed cases
+        }
     }
 
     consume(TokenKind::RBrace, "expected '}' to close handler");
@@ -1180,7 +1186,10 @@ ast::ExprPtr Parser::parse_resume() {
 
     if (!at(TokenKind::Semicolon) && !at(TokenKind::RParen) && !at(TokenKind::RBrace) &&
         !at(TokenKind::Comma) && !at_end()) {
-        auto value = parse_expression();
+        // The resume value is a unary expression (literal, parenthesized
+        // expression, identifier, call, ...) so that `resume(1) + resume(2)`
+        // parses as two resumes rather than one resume of `1 + resume(2)`.
+        auto value = parse_unary();
         if (auto* wildcard = dynamic_cast<ast::WildcardExpr*>(value.get()); wildcard != nullptr) {
             expression->wildcard = true;
             expression->value.reset();

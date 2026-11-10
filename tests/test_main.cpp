@@ -544,11 +544,11 @@ function main() {
 void test_run_handler() {
     expect_run("run_handler", R"GL(
 effect Counter {
-    operation count(): int;
+    function count() -> int;
 }
 
 function work(total: int) -> int {
-    return total + count() + count();
+    return total + Counter::count() + Counter::count();
 }
 
 function main() {
@@ -568,11 +568,11 @@ void test_run_multi_shot() {
     // the body re-runs from the raise point both times.
     expect_run("run_multi_shot", R"GL(
 effect Counter {
-    operation count(): int;
+    function count() -> int;
 }
 
 function main() {
-    int result = handle (count() + count()) with {
+    int result = handle (Counter::count() + Counter::count()) with {
         Counter::count() -> int {
             resume(1) + resume(2);
         }
@@ -586,14 +586,14 @@ function main() {
 void test_run_nested_handlers() {
     expect_run("run_nested_handlers", R"GL(
 effect A {
-    operation a(): int;
+    function a() -> int;
 }
 effect B {
-    operation b(): int;
+    function b() -> int;
 }
 
-function inner(): int {
-    return a() * 10 + b();
+function inner() -> int {
+    return A::a() * 10 + B::b();
 }
 
 function main() {
@@ -617,17 +617,17 @@ void test_run_ambient_handler() {
     // a non-resuming case's value becomes the operation result.
     expect_run("run_ambient_handler", R"GL(
 effect Noise {
-    operation ping(): int;
+    function ping() -> int;
 }
 
 handle Noise {
     function ping() -> int {
-        42
+        42;
     }
 }
 
 function main() {
-    println(`ping=${ping()}`);
+    println(`ping=${Noise::ping()}`);
 }
 )GL",
               "ping=42");
@@ -636,7 +636,7 @@ function main() {
 void test_run_unhandled_op() {
     expect_run_error("run_unhandled_op", R"GL(
 effect Counter {
-    operation count(): int;
+    function count() -> int;
 }
 
 function main() {
@@ -650,10 +650,10 @@ function main() {
 void test_run_handler_decl_evaluates_body() {
     expect_run("run_handler_decl_body", R"GL(
 effect Counter {
-    operation count(): int;
+    function count() -> int;
 }
 
-handle (count() + count()) with {
+handle (Counter::count() + Counter::count()) with {
     Counter::count() -> int {
         resume(10);
     }
