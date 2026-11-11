@@ -70,8 +70,13 @@ bool has_attribute(const ast::FunctionDecl& declaration, const std::string& name
                        });
 }
 
-bool builtin_type_from_name(const std::string& name, TypePtr& output) {
-    if (name == "int" || name == "i32" || name == "i64") {
+// True for the builtin `array<T>` type (a std-module class with one argument).
+bool is_array_type(const TypePtr& type) {
+    return type != nullptr && type->kind == Type::Kind::Named && type->name == "array" &&
+           type->arguments.size() == 1;
+}
+
+bool builtin_type_from_name(const std::string& name, TypePtr& output) {    if (name == "int" || name == "i32" || name == "i64") {
         output = types::integer();
         return true;
     }
@@ -229,6 +234,7 @@ private:
     void create_host_type_placeholders();
     void resolve_host_signatures();
     void add_ambient_symbols();
+    void inject_array_methods();
     TypePtr resolve_host_type_ref(const TypeRef& reference, ModuleInfo& module,
                                   const std::vector<std::string>& type_parameters);
     FunctionSymbol* create_function_symbol(ModuleInfo& module, TypeSymbol* owner,
@@ -420,6 +426,44 @@ void CheckerImpl::setup_host() {
     create_host_type_placeholders();
     resolve_host_signatures();
     add_ambient_symbols();
+    inject_array_methods();
+}
+
+// Adds the builtin `array<T>.get(index: int) -> Option<T>` method. It has no
+// declaration (implemented by the lowering pass as `handle Some(arr[i]) with
+// { ... => None }`), so the checker only supplies its type: generic binding
+// through the owner's `T` reuses the regular method-call machinery.
+void CheckerImpl::inject_array_methods() {
+    const auto std_it = modules_.find("std");
+    if (std_it == modules_.end()) {
+        return;
+    }
+    auto& std_module = *std_it->second;
+    const auto array_it = std_module.types.find("array");
+    const auto option_it = std_module.types.find("Option");
+    if (array_it == std_module.types.end() || option_it == std_module.types.end()) {
+        error(SourceSpan{}, "std module is missing the array or Option type");
+        return;
+    }
+    auto* array_type = array_it->second;
+    auto* option_type = option_it->second;
+
+    auto function = std::make_unique<FunctionSymbol>();
+    function->name = "get";
+    function->qualified_name = "std::array::get";
+    function->owner = array_type;
+    function->is_static = false;
+    function->is_host = false;
+    function->type_parameters = {"T"};
+    function->owner_type_parameter_count = 1;
+    function->parameter_names = {"index"};
+    function->parameter_types = {types::integer()};
+    function->result = make_named_type(option_type->qualified_name,
+                                       {make_type_parameter("T")});
+
+    auto* raw = function.get();
+    std_module.owned_functions.push_back(std::move(function));
+    array_type->methods["get"] = raw;
 }
 
 void CheckerImpl::create_host_type_placeholders() {
@@ -433,9 +477,13 @@ void CheckerImpl::create_host_type_placeholders() {
         for (const auto& type_schema : schema->types) {
             auto type = std::make_unique<TypeSymbol>();
             type->name = short_name(type_schema->name);
-            type->qualified_name = type_schema->name.find("::") != std::string::npos
-                                       ? type_schema->name
-                                       : module.name + "::" + type_schema->name;
+            // std module types use bare qualified names (array, Option,
+            // OutOfBounds) so diagnostics read `array<int>` and scripts can
+            // write `handle OutOfBounds::index(...)` without a prefix.
+            type->qualified_name = module.name == "std" || type_schema->name.find("::") !=
+                                                             std::string::npos
+                                       ? type->name
+                                       : module.name + "::" + type->name;
             type->module = module.name;
             type->type_parameters = type_schema->type_parameters;
             type->visibility = from_host_visibility(type_schema->visibility);
@@ -3022,6 +3070,28 @@ TypePtr CheckerImpl::check_assignment_target(const ast::Expr& expression, bool& 
         return types::error();
     }
 
+    if (const auto* index_target = dynamic_cast<const ast::IndexExpr*>(&expression)) {
+        const auto object_type = check_expression(*index_target->object);
+        const auto index_type = check_expression(*index_target->index);
+        if (!is_array_type(object_type)) {
+            error(expression.span, "indexing is not supported for type " +
+                                       object_type->to_string() + " (only array<T>)");
+            return types::error();
+        }
+        if (!is_assignable(index_type, types::integer())) {
+            error(index_target->index->span,
+                  "array index must be int, got " + index_type->to_string());
+        }
+        valid = true;
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::Index;
+            binding.type = object_type->arguments.front();
+            return binding;
+        }());
+        return object_type->arguments.front();
+    }
+
     error(expression.span, "invalid assignment target");
     return types::error();
 }
@@ -3097,12 +3167,22 @@ TypePtr CheckerImpl::check_expression(const ast::Expr& expression) {
 
     if (const auto* index = dynamic_cast<const ast::IndexExpr*>(&expression)) {
         const auto object_type = check_expression(*index->object);
-        check_expression(*index->index);
-        if (object_type->is_dynamic()) {
-            return types::dynamic();
+        const auto index_type = check_expression(*index->index);
+        if (is_array_type(object_type)) {
+            if (!is_assignable(index_type, types::integer())) {
+                error(index->index->span, "array index must be int, got " +
+                                              index_type->to_string());
+            }
+            bind(expression, [&] {
+                Binding binding;
+                binding.kind = BindingKind::Index;
+                binding.type = object_type->arguments.front();
+                return binding;
+            }());
+            return object_type->arguments.front();
         }
         error(expression.span, "indexing is not supported for type " +
-                                   object_type->to_string());
+                                   object_type->to_string() + " (only array<T>)");
         return types::error();
     }
 
@@ -3116,6 +3196,41 @@ TypePtr CheckerImpl::check_expression(const ast::Expr& expression) {
 
     if (const auto* handle = dynamic_cast<const ast::HandleExpr*>(&expression)) {
         return check_handle(*handle);
+    }
+
+    if (const auto* array = dynamic_cast<const ast::ArrayLiteralExpr*>(&expression)) {
+        // Element type: pairwise unification of the element types (match-arm
+        // rules). Mixed or empty literals are array<dynamic>.
+        TypePtr element = types::dynamic();
+        bool first = true;
+        for (const auto& item : array->elements) {
+            const auto item_type = check_expression(*item);
+            if (first) {
+                element = item_type;
+                first = false;
+                continue;
+            }
+            if (is_assignable(item_type, element) && is_assignable(element, item_type)) {
+                continue;
+            }
+            if (is_assignable(item_type, element)) {
+                continue; // item widens into the current element type
+            }
+            if (is_assignable(element, item_type)) {
+                element = item_type;
+                continue;
+            }
+            element = types::dynamic();
+        }
+
+        auto type = make_named_type("array", {element});
+        bind(expression, [&] {
+            Binding binding;
+            binding.kind = BindingKind::ArrayLiteral;
+            binding.type = type;
+            return binding;
+        }());
+        return type;
     }
 
     if (const auto* match = dynamic_cast<const ast::MatchExpr*>(&expression)) {
@@ -3274,6 +3389,11 @@ bool CheckerImpl::is_assignable(const TypePtr& from, const TypePtr& to) const {
     }
     if (from->is_builtin(BuiltinType::Int) && to->is_builtin(BuiltinType::Float)) {
         return true;
+    }
+    // Arrays are covariant in their element type (array<int> fits
+    // array<dynamic>); other named types are invariant.
+    if (is_array_type(from) && is_array_type(to)) {
+        return is_assignable(from->arguments.front(), to->arguments.front());
     }
     if (from->kind == Type::Kind::Named && to->kind == Type::Kind::Named) {
         return is_named_subtype(from, to);

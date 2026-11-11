@@ -146,6 +146,18 @@ std::string Runtime::stringify(const Value& value) {
     }
     case GcObject::Kind::Object:
         return "<" + as_object(value)->type->qualified_name + ">";
+    case GcObject::Kind::Array: {
+        std::string text = "[";
+        const auto& elements = as_array(value)->elements;
+        for (std::size_t i = 0; i < elements.size(); ++i) {
+            if (i > 0) {
+                text += ", ";
+            }
+            text += stringify(elements[i]);
+        }
+        text += "]";
+        return text;
+    }
     case GcObject::Kind::Closure:
         return "<function>";
     case GcObject::Kind::Continuation:
@@ -913,6 +925,65 @@ void Runtime::execute() {
                 break;
             }
             stack_.push_back(enum_value->payload[operands[0]]);
+            break;
+        }
+
+        case Op::ArrayNew: {
+            const auto argc = operands[0];
+            auto* array = heap_.allocate<ArrayObj>();
+            array->elements.assign(stack_.end() - argc, stack_.end());
+            stack_.resize(stack_.size() - argc);
+            stack_.push_back(Value::heap(array));
+            break;
+        }
+
+        case Op::ArrayGet: {
+            const auto index = pop();
+            const auto array = pop();
+            if (!array.is_heap() || array.as_heap()->kind != GcObject::Kind::Array) {
+                runtime_error(span, "cannot index " + array.type_name());
+                stack_.push_back(Value::unit());
+                break;
+            }
+            const auto* elements = &as_array(array)->elements;
+            const bool valid = index.is_int() &&
+                               index.as_int() >= 0 &&
+                               index.as_int() < static_cast<std::int64_t>(elements->size());
+            if (valid) {
+                stack_.push_back((*elements)[static_cast<std::size_t>(index.as_int())]);
+            } else {
+                // Effectful bounds check: the handler's result (or a resumed
+                // fallback) becomes the element value.
+                stack_.push_back(Value::integer(
+                    static_cast<std::int64_t>(elements->size())));
+                stack_.push_back(index);
+                raise_effect("OutOfBounds", "index", 2, span);
+            }
+            break;
+        }
+
+        case Op::ArraySet: {
+            const auto value = pop();
+            const auto index = pop();
+            const auto array = pop();
+            if (!array.is_heap() || array.as_heap()->kind != GcObject::Kind::Array) {
+                runtime_error(span, "cannot index " + array.type_name());
+                stack_.push_back(Value::unit());
+                break;
+            }
+            auto* elements = &as_array(array)->elements;
+            const bool valid = index.is_int() &&
+                               index.as_int() >= 0 &&
+                               index.as_int() < static_cast<std::int64_t>(elements->size());
+            if (valid) {
+                (*elements)[static_cast<std::size_t>(index.as_int())] = value;
+                stack_.push_back(Value::unit());
+            } else {
+                stack_.push_back(Value::integer(
+                    static_cast<std::int64_t>(elements->size())));
+                stack_.push_back(index);
+                raise_effect("OutOfBounds", "index", 2, span);
+            }
             break;
         }
 

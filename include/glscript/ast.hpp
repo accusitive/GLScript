@@ -92,6 +92,10 @@ struct BoolLiteralExpr : Expr {
     bool value = false;
 };
 
+struct ArrayLiteralExpr : Expr {
+    std::vector<ExprPtr> elements;
+};
+
 struct UnitLiteralExpr : Expr {};
 
 struct WildcardExpr : Expr {};

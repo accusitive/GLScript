@@ -29,6 +29,7 @@ struct GcObject;
 struct StringObj;
 struct EnumObj;
 struct ObjectInstance;
+struct ArrayObj;
 struct ClosureObj;
 struct ContinuationObj;
 
@@ -78,6 +79,7 @@ struct GcObject {
         String,
         Enum,
         Object,
+        Array,
         Closure,
         Continuation,
     };
@@ -129,6 +131,22 @@ struct ObjectInstance : GcObject {
 
     void trace(const std::function<void(GcObject*)>& visit) override {
         for (auto& value : fields) {
+            if (value.is_heap()) {
+                visit(value.as_heap());
+            }
+        }
+    }
+};
+
+// Script arrays: a growable vector of values. Element type is a compile-time
+// notion — the runtime object is untyped (`array<dynamic>` semantics).
+struct ArrayObj : GcObject {
+    ArrayObj() : GcObject(Kind::Array) {}
+
+    std::vector<Value> elements;
+
+    void trace(const std::function<void(GcObject*)>& visit) override {
+        for (auto& value : elements) {
             if (value.is_heap()) {
                 visit(value.as_heap());
             }
@@ -195,6 +213,7 @@ struct ContinuationObj : GcObject {
 StringObj* as_string(const Value& value);
 EnumObj* as_enum(const Value& value);
 ObjectInstance* as_object(const Value& value);
+ArrayObj* as_array(const Value& value);
 ClosureObj* as_closure(const Value& value);
 ContinuationObj* as_continuation(const Value& value);
 

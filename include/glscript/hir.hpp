@@ -115,6 +115,8 @@ struct Expr {
         Handle,          // PushHandler / call body function / PopHandler
         Match,           // pattern dispatch; emitter does the jump patching
         EnumPayload,     // payload[index] of an enum value (pattern bindings)
+        ArrayGet,        // arr[index]: element or OutOfBounds raise
+        ArrayNew,        // args on stack -> array value (literals)
         Abort,           // builtin `abort(...)`: fatal, never returns
     };
 

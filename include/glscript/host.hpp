@@ -3,6 +3,7 @@
 #include "glscript/type.hpp"
 #include "glscript/value.hpp"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -10,6 +11,10 @@
 #include <vector>
 
 namespace glscript {
+
+// Where host thunks send script-visible output (println, abort messages).
+// Defaults to stdout when no sink is supplied.
+using PrintSink = std::function<void(const std::string&)>;
 
 // A host-side type reference. Named references are resolved relative to the
 // module that owns the declaration, unless they contain an explicit "::".
@@ -295,5 +300,11 @@ public:
 private:
     std::vector<std::unique_ptr<ModuleSchema>> modules_;
 };
+
+// Registers the std module: `array<T>` (with `len`/`push` host methods), the
+// `Option<T>` enum, and the `OutOfBounds` effect backing effectful indexing.
+// Types in this module use bare qualified names and are global. Embedders
+// call this alongside their own bindings.
+void register_std(HostRegistry& host, PrintSink print = {});
 
 } // namespace glscript

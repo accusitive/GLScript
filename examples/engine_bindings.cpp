@@ -12,6 +12,9 @@ void register_engine_bindings(HostRegistry& host, PrintSink print) {
         print = [](const std::string& message) { std::cout << message << "\n"; };
     }
 
+    // std: array<T>, Option<T>, OutOfBounds effect
+    register_std(host);
+
     // input::Axis and input::Input
     {
         auto input = host.module("input");

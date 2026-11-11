@@ -232,6 +232,18 @@ private:
         case Expr::Kind::Match:
             dump_match(expression);
             break;
+        case Expr::Kind::ArrayGet:
+            out_ << "array_get(";
+            dump_expression(*expression.object);
+            out_ << "; ";
+            dump_call_args(expression);
+            out_ << ")";
+            break;
+        case Expr::Kind::ArrayNew:
+            out_ << "array_new(";
+            dump_call_args(expression);
+            out_ << ")";
+            break;
         case Expr::Kind::IntrinsicBinary:
             out_ << "(";
             dump_expression(*expression.lhs);

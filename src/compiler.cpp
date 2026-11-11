@@ -233,6 +233,16 @@ private:
             emit_instruction(Op::SetFieldByName, statement.span, {make_constant(
                 Constant{statement.target->field_name})});
             return;
+        case hir::Expr::Kind::ArrayGet:
+            // arr[i] = v: object, index, value — ArraySet pops value/index/
+            // object and leaves the op result (unit, or the handler's value
+            // when an OutOfBounds raise was handled), which is discarded.
+            emit_expression(*statement.target->object);
+            emit_call_arguments(*statement.target);
+            emit_expression(*statement.expression);
+            emit_instruction(Op::ArraySet, statement.span);
+            emit_instruction(Op::Pop, statement.span);
+            return;
         default:
             assert(false && "invalid assignment target kind");
             return;
@@ -296,6 +306,18 @@ private:
         case hir::Expr::Kind::EnumPayload:
             emit_expression(*expression.object);
             emit_instruction(Op::EnumPayload, expression.span, {expression.payload_index});
+            return;
+
+        case hir::Expr::Kind::ArrayGet:
+            emit_expression(*expression.object);
+            emit_call_arguments(expression); // the index
+            emit_instruction(Op::ArrayGet, expression.span);
+            return;
+
+        case hir::Expr::Kind::ArrayNew:
+            emit_call_arguments(expression); // the elements
+            emit_instruction(Op::ArrayNew, expression.span,
+                             {static_cast<std::uint32_t>(expression.args.size())});
             return;
 
         case hir::Expr::Kind::Match: {
@@ -549,6 +571,7 @@ std::size_t operand_count(Op op) {
     case Op::EnumVariant:
     case Op::EnumIsVariant:
     case Op::EnumPayload:
+    case Op::ArrayNew:
     case Op::GetField:
     case Op::SetField:
     case Op::GetFieldByName:

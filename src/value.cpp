@@ -28,6 +28,8 @@ std::string Value::type_name() const {
         return as_enum(*this)->variant->owner->qualified_name;
     case GcObject::Kind::Object:
         return as_object(*this)->type->qualified_name;
+    case GcObject::Kind::Array:
+        return "array";
     case GcObject::Kind::Closure:
         return "function";
     case GcObject::Kind::Continuation:
@@ -46,6 +48,10 @@ EnumObj* as_enum(const Value& value) {
 
 ObjectInstance* as_object(const Value& value) {
     return static_cast<ObjectInstance*>(value.as_heap());
+}
+
+ArrayObj* as_array(const Value& value) {
+    return static_cast<ArrayObj*>(value.as_heap());
 }
 
 ClosureObj* as_closure(const Value& value) {

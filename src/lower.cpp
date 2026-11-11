@@ -77,7 +77,32 @@ BinaryOp intrinsic_binary(const std::string& op) {
 
 class Lowerer {
 public:
-    explicit Lowerer(const glscript::Program& program) : program_(program) {}
+    explicit Lowerer(const glscript::Program& program) : program_(program) {
+        // std::Option variants for the synthesized array-get handler.
+        if (auto* std_module = program.find_module("std"); std_module != nullptr) {
+            if (const auto it = std_module->types.find("Option"); it != std_module->types.end()) {
+                const auto& variants = it->second->variants;
+                if (const auto some = variants.find("Some"); some != variants.end()) {
+                    some_variant_ = some->second;
+                }
+                if (const auto none = variants.find("None"); none != variants.end()) {
+                    none_variant_ = none->second;
+                }
+            }
+            // The runtime raises OutOfBounds::index directly (no Raise node
+            // lowers it), so the unhandled-op fallback thunk must be
+            // registered here.
+            if (const auto it = std_module->types.find("OutOfBounds");
+                it != std_module->types.end()) {
+                for (const auto* operation : it->second->effect_operations) {
+                    if (operation->name == "index") {
+                        host_function_id(operation);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     hir::Program lower() {
         register_script_functions();
@@ -527,6 +552,19 @@ private:
             return stmt;
         }
 
+        if (binding.kind == BindingKind::Index) {
+            // arr[i] = v: target is an ArrayGet-shaped node (object + index).
+            const auto* index_target = static_cast<const ast::IndexExpr*>(
+                assignment.target.get());
+            auto target = make_expr(Expr::Kind::ArrayGet, assignment.target->span);
+            target->object = lower_expression(*index_target->object);
+            if (index_target->index != nullptr) {
+                target->args.push_back(lower_expression(*index_target->index));
+            }
+            stmt.target = std::move(target);
+            return stmt;
+        }
+
         if (binding.kind == BindingKind::Field) {
             const auto* member = static_cast<const ast::MemberExpr*>(assignment.target.get());
             auto target = make_expr(Expr::Kind::Field, assignment.target->span);
@@ -664,8 +702,24 @@ private:
             return lower_member(*member);
         }
 
-        if (dynamic_cast<const ast::IndexExpr*>(&expression) != nullptr) {
-            return make_expr(Expr::Kind::Unit, expression.span); // still a stub
+        if (const auto* index = dynamic_cast<const ast::IndexExpr*>(&expression)) {
+            if (binding.kind == BindingKind::Index) {
+                auto expr = make_expr(Expr::Kind::ArrayGet, index->span);
+                expr->object = lower_expression(*index->object);
+                if (index->index != nullptr) {
+                    expr->args.push_back(lower_expression(*index->index));
+                }
+                return expr;
+            }
+            return make_expr(Expr::Kind::Unit, expression.span); // error recovery
+        }
+
+        if (const auto* array = dynamic_cast<const ast::ArrayLiteralExpr*>(&expression)) {
+            auto expr = make_expr(Expr::Kind::ArrayNew, array->span);
+            for (const auto& item : array->elements) {
+                expr->args.push_back(lower_expression(*item));
+            }
+            return expr;
         }
 
         if (const auto* lambda = dynamic_cast<const ast::LambdaExpr*>(&expression)) {
@@ -1022,6 +1076,98 @@ private:
         return expr;
     }
 
+    // ------------------------------------------------------------------
+    // Arrays
+    // ------------------------------------------------------------------
+
+    // std::array::get lowers to `handle Some(receiver[index]) with { => None }`
+    // using the existing handle desugaring: a cached handler-case function
+    // returning None plus a per-callsite body function, so `resume` in a
+    // user-supplied OutOfBounds handler flows through unchanged.
+    ExprPtr lower_array_get(const ast::Expr& receiver, const ast::Expr& index,
+                            const SourceSpan& span) {
+        auto expr = make_expr(Expr::Kind::Handle, span);
+        expr->table_ref = array_none_table();
+        expr->body_fn = lower_array_get_body(receiver, index, span, expr->captures);
+        return expr;
+    }
+
+    std::uint32_t lower_array_get_body(const ast::Expr& receiver, const ast::Expr& index,
+                                       const SourceSpan& span,
+                                       std::vector<CaptureRef>& captures) {
+        const auto fn_index =
+            new_function("(array get)", "std::array::get", Origin::HandleBody);
+
+        FuncState state;
+        state.fn_index = fn_index;
+        state.enclosing = state_;
+        state.scopes.emplace_back();
+        state_ = &state;
+
+        auto get = make_expr(Expr::Kind::ArrayGet, span);
+        get->object = lower_expression(receiver);
+        get->args.push_back(lower_expression(index));
+
+        auto some = make_expr(Expr::Kind::EnumNew, span);
+        some->variant_id = variant_id(some_variant_);
+        some->args.push_back(std::move(get));
+
+        Block body;
+        body.items.push_back(make_return(std::move(some), span));
+        fn().body = std::move(body);
+
+        for (auto& capture : state.captures) {
+            captures.push_back(CaptureRef{capture.is_local, capture.index});
+        }
+        fn(fn_index).capture_count = static_cast<std::uint32_t>(captures.size());
+        state_ = state.enclosing;
+        return fn_index;
+    }
+
+    std::uint32_t array_none_table() {
+        if (!array_none_table_ready_) {
+            array_none_table_ready_ = true;
+            array_none_table_ = register_array_none_table();
+        }
+        return array_none_table_;
+    }
+
+    std::uint32_t register_array_none_table() {
+        const auto fn_index =
+            new_function("(array get none)", "OutOfBounds::index", Origin::HandlerCase);
+
+        FuncState state;
+        state.fn_index = fn_index;
+        state.enclosing = state_;
+        state.scopes.emplace_back();
+        state_ = &state;
+        Function& fn = this->fn();
+
+        fn.param_names = {"size", "index"};
+        state.declare("size", fn);
+        state.declare("index", fn);
+        fn.param_count = state.local_count;
+        fn.resume_slot = state.declare(kContinuationSlot, fn);
+
+        auto none = make_expr(Expr::Kind::EnumVariant, {});
+        none->variant_id = variant_id(none_variant_);
+
+        Block body;
+        body.items.push_back(make_return(std::move(none), {}));
+        fn.body = std::move(body);
+
+        state_ = state.enclosing;
+
+        HandlerTable table;
+        HandlerEntry entry;
+        entry.effect = "OutOfBounds";
+        entry.operation = "index";
+        entry.function = fn_index;
+        table.entries.push_back(std::move(entry));
+        out_.handler_tables.push_back(std::move(table));
+        return static_cast<std::uint32_t>(out_.handler_tables.size() - 1);
+    }
+
     ExprPtr lower_call(const ast::CallExpr& call) {
         const auto& binding = call.callee->binding;
 
@@ -1052,6 +1198,16 @@ private:
             expr->variant_id = variant_id(function->owner->variants.at(function->name));
             lower_call_arguments(*expr, binding, call);
             return expr;
+        }
+
+        // std::array::get: synthesized `handle Some(arr[i]) with { => None }`.
+        if (function->owner != nullptr && function->owner->name == "array" &&
+            function->name == "get" && function->declaration == nullptr) {
+            const auto* member = dynamic_cast<const ast::MemberExpr*>(call.callee.get());
+            if (member == nullptr || call.arguments.size() != 1 || some_variant_ == nullptr) {
+                return make_expr(Expr::Kind::Unit, call.span); // error recovery
+            }
+            return lower_array_get(*member->object, *call.arguments[0], call.span);
         }
 
         if (function->is_effect_operation) {
@@ -1230,6 +1386,10 @@ private:
     hir::Program out_;
     FuncState* state_ = nullptr;
     std::uint32_t pattern_counter_ = 0; // hidden locals: $match/$let/$patN
+    const EnumVariantSymbol* some_variant_ = nullptr; // std Option
+    const EnumVariantSymbol* none_variant_ = nullptr;
+    bool array_none_table_ready_ = false; // cached `get` handler table
+    std::uint32_t array_none_table_ = 0;
 };
 
 } // namespace

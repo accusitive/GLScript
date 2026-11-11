@@ -3,13 +3,14 @@
 Status as of 2026-11-11. Landed: handle-body delimitation (3c09d99) → HIR
 refactor (8ca562e) → splice-aware continuations, suite green (603d0c0) →
 scripted gravity demo (63f8416) → effects showcase (1276e65) → embedding API
-+ sandbox engine → pattern matching (see
-[pattern-matching-plan.md](pattern-matching-plan.md)).
++ sandbox engine → pattern matching → arrays (see
+[pattern-matching-plan.md](pattern-matching-plan.md) and
+[arrays-plan.md](arrays-plan.md)).
 
 ## What works
 
 **Pipeline** — `lexer → parser → checker → hir::lower → hir::emit →
-interpreter` is fully wired. 60 unit tests + 4 ctest suites green (the three
+interpreter` is fully wired. 70 unit tests + 4 ctest suites green (the three
 demos run headless in ctest).
 
 - **Language core**: functions, methods, classes with multi-level inheritance
@@ -27,6 +28,16 @@ demos run headless in ctest).
   refutability checking for `let`. Implemented as a flat per-arm test plan in
   HIR (`MatchTest`: variant/literal/bind conjuncts) compiled by the emitter's
   jump patching; two new opcodes (`EnumIsVariant`, `EnumPayload`).
+- **Arrays**: `array<T>` builtin generic (std module, no import needed) with
+  JS-style literals `[0, 1, 2]` (element type unified; mixed/empty →
+  `array<dynamic>`), element-covariant assignment (`array<int>` fits
+  `array<dynamic>`), `len()`/`push(v)` host methods, element write `arr[i] = v`,
+  and effectful reads: out-of-bounds (or non-int) indices raise the std
+  `OutOfBounds::index(size, got)` effect — handle it at the callsite (the
+  handler's result, or a `resume`d substitute, becomes the element value) or
+  let the fallback thunk print details and abort. `arr.get(i) -> Option<T>`
+  (`std` `Option` enum, pattern-matchable) wraps `[]` with a synthesized
+  handler: `Some(elem)` / `None`, never raises.
 - **Effects & continuations**: `handle … with {}` expressions, top-level
   ambient `handle Effect {}` declarations, handler cases with implicit
   continuation parameters, `resume` — including re-raises inside resumed
@@ -56,7 +67,7 @@ demos run headless in ctest).
 
 | Area | State |
 |---|---|
-| **Indexing** | `IndexExpr` is a stub (lowers to unit); the checker rejects it for most types. No collections/vectors yet. |
+| **Indexing** | Works for `array<T>` only (reads raise `OutOfBounds`, writes raise too). Indexing other types is a checker error; chained reads into `array<dynamic>` elements need `downcast`. No collections beyond arrays yet. |
 | **Captured-variable assignment** | By-value upvalues: assigning to a captured var is silently discarded (documented limitation). |
 | **Multi-shot semantics** | `resume` is tail-position: code after a non-identity resume in the handler is dead. One activation cannot resume twice *and* use both completions at the outer level. (True recursive multi-shot — the canonical algebraic reading — would give 48, not 4, for the multi-shot test script; the implemented semantics match the committed tests.) |
 | **`glc` can't run scripts** | `glc` checks and dumps HIR only; no `-r`/run mode and no bytecode output. Running requires the C++ API. |

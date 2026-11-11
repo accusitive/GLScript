@@ -51,6 +51,11 @@ enum class Op : std::uint32_t {
     EnumCtor,      // variant argc             payload on stack -> enum value
     EnumIsVariant, // variant                  pop value; push bool (variant match)
     EnumPayload,   // index                    pop enum value; push payload[index]
+    ArrayNew,      // argc                     elements on stack -> array value
+    ArrayGet,      //                          pop index, array -> element; raises
+                   //                          OutOfBounds::index when invalid
+    ArraySet,      //                          pop value, index, array -> write or
+                   //                          raise; pushes the op result
     GetField,      // slot                     object.field[slot]
     SetField,      // slot                     object + value on stack
     GetFieldByName,// name                     dynamic member read

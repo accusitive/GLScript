@@ -1417,8 +1417,27 @@ ast::ExprPtr Parser::parse_handle_expr() {
 }
 
 ast::ExprPtr Parser::parse_primary() {
-    if (at(TokenKind::Integer)) {
-        const auto token = advance();
+    // Array literal: [expr, expr, ...] (trailing comma allowed, [] empty).
+    if (at(TokenKind::LBracket)) {
+        const auto begin = advance();
+        auto expression = make_node<ast::ArrayLiteralExpr>(begin.span);
+        if (!at(TokenKind::RBracket)) {
+            while (true) {
+                expression->elements.push_back(parse_expression());
+                if (!match(TokenKind::Comma)) {
+                    break;
+                }
+                if (at(TokenKind::RBracket)) {
+                    break;
+                }
+            }
+        }
+        consume(TokenKind::RBracket, "expected ']' to close array literal");
+        expression->span = span_from(begin);
+        return expression;
+    }
+
+    if (at(TokenKind::Integer)) {        const auto token = advance();
         auto expression = make_node<ast::IntLiteralExpr>(token.span);
         expression->text = token.text;
         return expression;

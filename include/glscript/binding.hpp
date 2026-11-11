@@ -28,6 +28,8 @@ enum class BindingKind : unsigned char {
                   // comparison, logical)
     Operator,     // an overloaded operator; `op` is the resolved overload
     Downcast,     // `downcast::<T>`; `type` is the target type
+    ArrayLiteral, // `[a, b, c]`; `type` is `array<T>`/`array<dynamic>`
+    Index,        // `arr[i]` on an `array<T>`; `type` is the element type
 };
 
 struct Binding {

@@ -1068,6 +1068,166 @@ function main() {
               "compute: 7 0 6\nshadowing: 20");
 }
 
+// ---------------------------------------------------------------------------
+// Arrays: array<T>, effectful indexing, Option<T>.get
+// ---------------------------------------------------------------------------
+
+void test_array_basics() {
+    expect_run("array basics", R"GL(
+function main() {
+    let numbers = [10, 20, 30];
+    println(`arr=${numbers} len=${numbers.len()}`);
+    println(`first=${numbers[0]} last=${numbers[2]}`);
+
+    numbers[1] = 99;
+    println(`mutated=${numbers}`);
+
+    let stack: array<int> = [];
+    stack.push(5);
+    stack.push(6);
+    println(`stack=${stack} len=${stack.len()}`);
+
+    let words = ["alpha", "beta"];
+    println(`word=${words[1]}`);
+}
+)GL",
+              "arr=[10, 20, 30] len=3\nfirst=10 last=30\nmutated=[10, 99, 30]\n"
+              "stack=[5, 6] len=2\nword=beta");
+}
+
+void test_array_dynamic_and_nested() {
+    expect_run("array dynamic and nested", R"GL(
+function main() {
+    let mixed: array<dynamic> = [1, "two", true, [3, 4]];
+    println(`len=${mixed.len()} mid=${mixed[1]} flag=${mixed[2]}`);
+    println(`nested=${mixed[3]}`);
+
+    let wide = [1, 2.5, "three"];
+    println(`wide=${wide} wide1=${wide[1]}`);
+
+    let typed: array<dynamic> = [7, 8];
+    println(`coerced=${typed}`);
+}
+)GL",
+              "len=4 mid=two flag=true\nnested=[3, 4]\n"
+              "wide=[1, 2.5, three] wide1=2.5\ncoerced=[7, 8]");
+}
+
+void test_array_get_option() {
+    expect_run("array get Option", R"GL(
+function describe(opt: Option<int>) -> String {
+    return match opt {
+        Option::Some(v) => `some ${v}`,
+        Option::None => "none",
+    };
+}
+
+function main() {
+    let a = [10, 20, 30];
+    println(describe(a.get(0)));
+    println(describe(a.get(2)));
+    println(describe(a.get(3)));
+    println(describe(a.get(-1)));
+
+    let empty: array<int> = [];
+    println(describe(empty.get(0)));
+
+    let words = ["x", "y"];
+    let w = words.get(1);
+    match w {
+        Option::Some(text) => println(`got ${text}`),
+        Option::None => println("missing"),
+    }
+}
+)GL",
+              "some 10\nsome 30\nnone\nnone\nnone\ngot y");
+}
+
+void test_array_bounds_effect() {
+    expect_run("array bounds effect", R"GL(
+function with_fallback(a: array<int>) -> int {
+    return handle a[10] with {
+        function OutOfBounds::index(size: int, got: int) -> int {
+            return 0;
+        }
+    };
+}
+
+function clamped(a: array<int>, i: int) -> int {
+    return handle a[i] with {
+        function OutOfBounds::index(size: int, got: int) -> int {
+            // resume substitutes the element value (parenthesized so the
+            // arithmetic is part of the resumed value, not dead code).
+            return resume (size - 1);
+        }
+    };
+}
+
+function main() {
+    let a = [7, 8, 9];
+    println(`fallback=${with_fallback(a)}`);
+    println(`clamped=${clamped(a, 99)}`);
+    println(`direct=${clamped(a, 1)}`);
+}
+)GL",
+              "fallback=0\nclamped=2\ndirect=8");
+}
+
+void test_array_unhandled_bounds() {
+    expect_run_error("array unhandled bounds", R"GL(
+function main() {
+    let a = [1, 2, 3];
+    let boom = a[42];
+    println(`never ${boom}`);
+}
+)GL",
+              "aborted by host operation 'index'");
+}
+
+void test_array_type_errors() {
+    expect_error("index non-array", R"GL(
+function main() {
+    let n = 5;
+    println(n[0]);
+}
+)GL",
+                  "indexing is not supported for type int");
+
+    expect_error("float index", R"GL(
+function main() {
+    let a = [1, 2];
+    println(a[1.5]);
+}
+)GL",
+                  "array index must be int");
+
+    expect_error("array element type mismatch", R"GL(
+function main() {
+    let a: array<int> = [1, 2];
+    let b: array<String> = a;
+    println(b);
+}
+)GL",
+                  "cannot initialize");
+
+    expect_error("push wrong element type", R"GL(
+function main() {
+    let a = [1, 2];
+    a.push("nope");
+    println(a);
+}
+)GL",
+                  "argument 1 of 'push'");
+
+    expect_error("bare array type", R"GL(
+function main() {
+    let a: array = [];
+    println(a);
+}
+)GL",
+                  "expects 1 type argument(s)");
+}
+
 void test_handler_case_capture_rejected() {
     // Handler cases run as plain functions with no closure object, so a
     // reference to an outer variable would crash the interpreter (previously
@@ -1327,6 +1487,12 @@ int main() {  // NOLINT(readability-function-size)
     test_match_dynamic_scrutinee();
     test_match_effects_and_captures();
     test_handler_case_capture_rejected();
+    test_array_basics();
+    test_array_dynamic_and_nested();
+    test_array_get_option();
+    test_array_bounds_effect();
+    test_array_unhandled_bounds();
+    test_array_type_errors();
 
     std::cout << "\n" << passes << " passed, " << failures << " failed\n";
     return failures == 0 ? 0 : 1;

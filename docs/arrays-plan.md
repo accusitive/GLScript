@@ -1,6 +1,6 @@
 # Arrays plan: `array<T>`, literals, effectful indexing, `Option<T>.get`
 
-Status: **planned** (this commit lands the design; implementation follows).
+Status: **implemented** (landed 2026-11-11; deviations from the design below).
 
 ## 1. Surface
 
@@ -103,6 +103,22 @@ Iteration (`for x in arr`), `pop`/`insert`/`remove`, slices, fixed-length
 arrays, `==` on arrays, arrays as downcast targets.
 
 ## 7. Test plan
+
+Deviations from the original design, kept for behavior-identical semantics:
+
+- **`resume` substitutes the element value, it does not re-index.** The
+  handler's resumed value becomes what `arr[i]` evaluates to (consistent with
+  how every effect op's result flows). Note `return resume size - 1` parses
+  as `(resume size) - 1` and the `- 1` is dead under transfer semantics —
+  write `resume (size - 1)`.
+- **Indexing is restricted to `array<T>` scrutinees** — indexing `dynamic`
+  (previously a silent unit-returning stub) is now a checker error; chained
+  reads into `array<dynamic>` elements need a `downcast` first.
+- Unhandled out-of-bounds prints the details via the print sink and aborts
+  with `aborted by host operation 'index'` (the runtime raises directly, so
+  the lowering pass pre-registers the fallback thunk).
+
+## 8. Test plan
 
 - Literals (typed, mixed → dynamic, nested, empty), `len`, `push`, element
   assignment, `array<dynamic>` heterogeneity, arrays as params/fields/
