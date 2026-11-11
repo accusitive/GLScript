@@ -703,10 +703,186 @@ function main() {
 
 } // namespace
 
+void test_embed_behaviour_lifecycle() {
+    // Unity-style embedding: the host constructs a behaviour instance, drives
+    // its lifecycle through call_method, and reads/writes its fields.
+    glscript::HostRegistry host;
+    glscript::register_engine_bindings(host);
+    glscript::DiagnosticSink diagnostics;
+    glscript::Frontend frontend(host, diagnostics);
+
+    const bool ok = frontend.check_source("embed", "embed.gl", R"GL(
+class Counter extends EntityBehaviour {
+    int count = 0;
+    float factor = 2.0f;
+
+    function on_start() {
+        count = 10;
+    }
+
+    function tick(n: int) -> int {
+        count = count + n;
+        return count;
+    }
+
+    function scaled() -> float {
+        return count * factor;
+    }
+}
+)GL");
+    if (!ok) {
+        fail("embed_behaviour_lifecycle", diagnostics.format());
+        return;
+    }
+
+    auto bytecode = glscript::compile_program(frontend.program());
+    glscript::Runtime runtime(frontend.program(), bytecode, host, diagnostics);
+
+    auto* module = frontend.program().find_module("embed");
+    auto* type = module != nullptr ? module->types.at("Counter") : nullptr;
+    if (type == nullptr) {
+        fail("embed_behaviour_lifecycle", "script class Counter not found");
+        return;
+    }
+
+    // The host is the "prefab": it supplies the initial field values and
+    // keeps the instance alive across GC cycles.
+    auto instance = runtime.make_object(type, {glscript::Value::integer(0),
+                                               glscript::Value::floating(2.0)});
+    runtime.retain(instance);
+
+    if (runtime.call_method(instance, "on_start").is_unit() &&
+        diagnostics.has_errors()) {
+        fail("embed_behaviour_lifecycle", diagnostics.format());
+        return;
+    }
+
+    auto count = runtime.field(instance, "count");
+    if (!count.is_int() || count.as_int() != 10) {
+        fail("embed_behaviour_lifecycle", "on_start did not set count to 10");
+        return;
+    }
+
+    const auto ticked = runtime.call_method(instance, "tick",
+                                            {glscript::Value::integer(5)});
+    if (!ticked.is_int() || ticked.as_int() != 15) {
+        fail("embed_behaviour_lifecycle", "tick returned wrong value");
+        return;
+    }
+
+    runtime.set_field(instance, "factor", glscript::Value::floating(10.0));
+    const auto scaled = runtime.call_method(instance, "scaled");
+    if (!scaled.is_float() || scaled.as_float() != 150.0) {
+        fail("embed_behaviour_lifecycle", "scaled returned wrong value");
+        return;
+    }
+
+    // The retained instance must survive several forced collections.
+    for (int i = 0; i < 5; ++i) {
+        runtime.gc_collect();
+    }
+    count = runtime.field(instance, "count");
+    if (!count.is_int() || count.as_int() != 15) {
+        fail("embed_behaviour_lifecycle", "retained instance was collected");
+        return;
+    }
+
+    pass("embed_behaviour_lifecycle");
+}
+
+void test_embed_method_dispatch() {
+    // call_method dispatches on the instance's runtime type: two classes
+    // with the same method name get their own bodies.
+    glscript::HostRegistry host;
+    glscript::register_engine_bindings(host);
+    glscript::DiagnosticSink diagnostics;
+    glscript::Frontend frontend(host, diagnostics);
+
+    const bool ok = frontend.check_source("dispatch", "dispatch.gl", R"GL(
+class Base extends EntityBehaviour {
+    function describe() -> String {
+        return "base";
+    }
+}
+
+class Derived extends Base {
+    function describe() -> String {
+        return "derived";
+    }
+}
+
+class Other extends EntityBehaviour {
+    function describe() -> String {
+        return "other";
+    }
+}
+)GL");
+    if (!ok) {
+        fail("embed_method_dispatch", diagnostics.format());
+        return;
+    }
+
+    auto bytecode = glscript::compile_program(frontend.program());
+    glscript::Runtime runtime(frontend.program(), bytecode, host, diagnostics);
+
+    auto* module = frontend.program().find_module("dispatch");
+    const auto make = [&](const std::string& class_name) {
+        return runtime.make_object(module->types.at(class_name), {});
+    };
+
+    const auto derived = make("Derived");
+    const auto base = make("Base");
+    const auto other = make("Other");
+    runtime.retain(derived);
+    runtime.retain(base);
+    runtime.retain(other);
+
+    const auto describe = [&](const glscript::Value& instance) {
+        return runtime.call_method(instance, "describe");
+    };
+
+    if (describe(derived).type_name() != "String" ||
+        runtime.stringify(describe(derived)) != "derived" ||
+        runtime.stringify(describe(base)) != "base" ||
+        runtime.stringify(describe(other)) != "other") {
+        fail("embed_method_dispatch", "dispatch did not follow the runtime type");
+        return;
+    }
+
+    pass("embed_method_dispatch");
+}
+
+void test_host_module_name_collision() {
+    // A source module must not silently share a host module's name: the
+    // script's declarations would vanish while checking "succeeds".
+    glscript::HostRegistry host;
+    glscript::register_engine_bindings(host); // provides host module 'input'
+    glscript::DiagnosticSink diagnostics;
+    glscript::Frontend frontend(host, diagnostics);
+    const bool ok = frontend.check_source("input", "input.gl", R"GL(
+function helper() {
+    return 1;
+}
+)GL");
+    if (ok) {
+        fail("host module name collision",
+             "a source module shadowing a host module was accepted");
+        return;
+    }
+    if (diagnostics.format().find("provided by the host") == std::string::npos) {
+        fail("host module name collision", diagnostics.format());
+        return;
+    }
+    pass("host module name collision");
+}
+
 int main() {  // NOLINT(readability-function-size)
 
     test_entity_sketch();
     test_runtime_sketch();
+    test_embed_behaviour_lifecycle();
+    test_embed_method_dispatch();
+    test_host_module_name_collision();
     test_unknown_identifier();
     test_wrong_argument_type();
     test_downcast();

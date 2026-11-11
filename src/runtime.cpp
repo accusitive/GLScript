@@ -156,7 +156,8 @@ std::string Runtime::stringify(const Value& value) {
 
 void Runtime::gc_collect() {
     std::vector<Value*> roots;
-    roots.reserve(stack_.size() + frames_.size() + continuations_.size());
+    roots.reserve(stack_.size() + frames_.size() + continuations_.size() +
+                  gc_roots_.size());
     for (auto& value : stack_) {
         roots.push_back(&value);
     }
@@ -165,6 +166,9 @@ void Runtime::gc_collect() {
     }
     for (auto& continuation : continuations_) {
         roots.push_back(&continuation);
+    }
+    for (auto& value : gc_roots_) {
+        roots.push_back(&value);
     }
     for (auto& function_constants : constants_) {
         for (auto& value : function_constants) {
@@ -241,6 +245,87 @@ Value Runtime::run(const std::string& module_name, const std::string& function_n
     execute();
 
     return result_;
+}
+
+Value Runtime::call_method(const Value& receiver, const std::string& name,
+                           std::vector<Value> arguments) {
+    failed_ = false;
+    result_ = Value::unit();
+
+    if (!receiver.is_heap() || receiver.as_heap()->kind != GcObject::Kind::Object) {
+        runtime_error(SourceSpan{}, "runtime: call_method expects an object receiver");
+        return Value::unit();
+    }
+
+    // Dispatch on the instance's runtime type, walking its base chain; only
+    // script methods have compiled bodies.
+    const FunctionSymbol* method = nullptr;
+    for (auto* type = as_object(receiver)->type; type != nullptr && method == nullptr;
+         type = type->base) {
+        const auto it = type->methods.find(name);
+        if (it != type->methods.end() && !it->second->is_host) {
+            method = it->second;
+        }
+    }
+    if (method == nullptr) {
+        runtime_error(SourceSpan{},
+                      "runtime: type '" + as_object(receiver)->type->qualified_name +
+                          "' has no script method '" + name + "'");
+        return Value::unit();
+    }
+    const auto fn_it = bytecode_.function_ids.find(method);
+    if (fn_it == bytecode_.function_ids.end()) {
+        runtime_error(SourceSpan{}, "runtime: method '" + name + "' has no compiled body");
+        return Value::unit();
+    }
+
+    // The receiver is argument slot 0, matching compiled method calls.
+    stack_.push_back(receiver);
+    const auto argc = static_cast<std::uint32_t>(arguments.size());
+    for (auto& argument : arguments) {
+        stack_.push_back(std::move(argument));
+    }
+    push_frame(fn_it->second, argc + 1, Value::unit());
+    execute();
+    return result_;
+}
+
+Value Runtime::field(const Value& object, const std::string& name) const {
+    if (!object.is_heap() || object.as_heap()->kind != GcObject::Kind::Object) {
+        diagnostics_.error(SourceSpan{},
+                           "runtime: cannot read field '" + name + "' of " +
+                               object.type_name());
+        return Value::unit();
+    }
+    const auto slot = find_field_slot(as_object(object), name);
+    if (slot < 0) {
+        diagnostics_.error(SourceSpan{},
+                           "runtime: type '" + as_object(object)->type->qualified_name +
+                               "' has no field '" + name + "'");
+        return Value::unit();
+    }
+    return as_object(object)->fields[static_cast<std::size_t>(slot)];
+}
+
+void Runtime::set_field(const Value& object, const std::string& name, Value value) {
+    if (!object.is_heap() || object.as_heap()->kind != GcObject::Kind::Object) {
+        diagnostics_.error(SourceSpan{},
+                           "runtime: cannot write field '" + name + "' of " +
+                               object.type_name());
+        return;
+    }
+    const auto slot = find_field_slot(as_object(object), name);
+    if (slot < 0) {
+        diagnostics_.error(SourceSpan{},
+                           "runtime: type '" + as_object(object)->type->qualified_name +
+                               "' has no field '" + name + "'");
+        return;
+    }
+    as_object(object)->fields[static_cast<std::size_t>(slot)] = std::move(value);
+}
+
+void Runtime::retain(Value value) {
+    gc_roots_.push_back(std::move(value));
 }
 
 void Runtime::push_frame(std::uint32_t index, std::uint32_t argc, Value closure) {
@@ -774,6 +859,9 @@ void Runtime::execute() {
             frames_.pop_back();
             stack_.resize(base);
             stack_.push_back(value);
+            if (frames_.empty()) {
+                result_ = value; // the entry call's return value
+            }
             while (!handlers_.empty() &&
                    handlers_.back().frame_index >= frames_.size()) {
                 handlers_.pop_back();

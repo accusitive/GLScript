@@ -1,0 +1,98 @@
+// ---------------------------------------------------------------------------
+// The sandbox behaviours — the Unity-C# side of glscript.
+//
+// The C++ engine (sandbox_demo.cpp) owns the entities and the frame loop.
+// Each entity gets a behaviour instance of one of the classes below; the
+// engine fills the prefab-configured fields, keeps the instance alive, and
+// drives the lifecycle: on_start, update(dt), on_collision(other).
+//
+// Script -> engine calls are effect-style host operations (axis, spawn,
+// despawn, add_score, player, flash); engine -> script calls go through
+// Runtime::call_method, dispatching on the instance's runtime class.
+// ---------------------------------------------------------------------------
+
+import game::{Entity, Vec2};
+
+class PlayerBehaviour extends EntityBehaviour {
+    // Prefab-configured (the engine's per-instance field overrides).
+    float speed = 0.0f;
+    float cooldown = 0.0f;
+
+    // Runtime state.
+    float shoot_timer = 0.0f;
+    Entity entity;
+
+    function on_start() {
+        println(`player on field (speed ${speed}, cooldown ${cooldown}s)`);
+    }
+
+    function update(dt: float) {
+        Vec2 p = entity.position();
+        p = p + Vec2::new(axis("horizontal"), axis("vertical")) * (speed * dt);
+
+        // stay in the arena
+        if (p.x < 24.0f) { p.x = 24.0f; }
+        if (p.x > 776.0f) { p.x = 776.0f; }
+        if (p.y < 40.0f) { p.y = 40.0f; }
+        if (p.y > 400.0f) { p.y = 400.0f; }
+        entity.set_position(p);
+
+        shoot_timer = shoot_timer - dt;
+        if (shoot_timer <= 0.0f && axis("fire") > 0.0f) {
+            shoot_timer = cooldown;
+            spawn("bullet", p.x, p.y - 16.0f);
+        }
+    }
+}
+
+class PickupBehaviour extends EntityBehaviour {
+    float spin_speed = 0.0f;
+
+    float spin = 0.0f;
+    Entity entity;
+
+    function update(dt: float) {
+        // the renderer reads this field back to rotate the pickup
+        spin = spin + spin_speed * dt;
+    }
+
+    function on_collision(other: Entity) {
+        add_score(1);
+        println(`pickup collected (score ${score()})`);
+        despawn(entity);
+    }
+}
+
+class ChaserBehaviour extends EntityBehaviour {
+    float speed = 0.0f;
+    Entity entity;
+
+    function update(dt: float) {
+        Vec2 to = player().position() - entity.position();
+        float len = to.length();
+        if (len > 1.0f) {
+            entity.set_position(entity.position() + to * (speed * dt / len));
+        }
+    }
+
+    function on_collision(other: Entity) {
+        flash();
+    }
+}
+
+class BulletBehaviour extends EntityBehaviour {
+    float life = 0.0f;
+    Entity entity;
+
+    function update(dt: float) {
+        life = life - dt;
+        if (life <= 0.0f) {
+            despawn(entity);
+        }
+    }
+
+    function on_collision(other: Entity) {
+        println("direct hit");
+        despawn(entity);
+    }
+}

@@ -46,39 +46,60 @@ target_link_libraries(glc PRIVATE glscript)
 
 enable_testing()
 
+# Links raylib from the system when installed, otherwise fetches and builds
+# it into the build directory. (raylib's installed config exports the target
+# as `raylib`.)
+function(glscript_link_raylib target)
+    find_package(raylib QUIET)
+    if(raylib_FOUND)
+        target_link_libraries(${target} PRIVATE raylib)
+    else()
+        include(FetchContent)
+        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(raylib
+            URL https://github.com/raysan5/raylib/archive/refs/tags/6.0.tar.gz)
+        FetchContent_MakeAvailable(raylib)
+        target_link_libraries(${target} PRIVATE raylib)
+    endif()
+    target_compile_definitions(${target} PRIVATE GLSCRIPT_HAVE_RAYLIB)
+endfunction()
+
 option(GLSCRIPT_BUILD_ENTT_EXAMPLE "Build the EnTT integration example" ON)
 
-if(GLSCRIPT_BUILD_ENTT_EXAMPLE)
-    set(_entt_include_dir "${GLSCRIPT_ENTT_INCLUDE_DIR}")
-    if(NOT _entt_include_dir)
-        set(_entt_include_dir "${CMAKE_BINARY_DIR}/_deps/entt-include")
-        set(_entt_header "${_entt_include_dir}/entt/entt.hpp")
-        if(NOT EXISTS "${_entt_header}")
-            file(MAKE_DIRECTORY "${_entt_include_dir}/entt")
-            message(STATUS "Downloading EnTT single-header")
-            file(DOWNLOAD
-                "https://raw.githubusercontent.com/skypjack/entt/refs/heads/main/single_include/entt/entt.hpp"
-                "${_entt_header}"
-                STATUS _entt_download_status
-                TLS_VERIFY ON)
-            list(GET _entt_download_status 0 _entt_download_code)
-            if(NOT _entt_download_code EQUAL 0)
-                list(GET _entt_download_status 1 _entt_download_message)
-                file(REMOVE "${_entt_header}")
-                message(WARNING
-                    "Could not download EnTT (${_entt_download_message}). "
-                    "Set GLSCRIPT_ENTT_INCLUDE_DIR to a directory containing entt/entt.hpp "
-                    "to build the entt_demo example.")
-                set(_entt_include_dir "")
-            endif()
+# EnTT (used by the demos). Downloaded once into the build directory unless
+# GLSCRIPT_ENTT_INCLUDE_DIR points at a copy.
+set(_entt_include_dir "${GLSCRIPT_ENTT_INCLUDE_DIR}")
+if(NOT _entt_include_dir)
+    set(_entt_include_dir "${CMAKE_BINARY_DIR}/_deps/entt-include")
+    set(_entt_header "${_entt_include_dir}/entt/entt.hpp")
+    if(NOT EXISTS "${_entt_header}")
+        file(MAKE_DIRECTORY "${_entt_include_dir}/entt")
+        message(STATUS "Downloading EnTT single-header")
+        file(DOWNLOAD
+            "https://raw.githubusercontent.com/skypjack/entt/refs/heads/main/single_include/entt/entt.hpp"
+            "${_entt_header}"
+            STATUS _entt_download_status
+            TLS_VERIFY ON)
+        list(GET _entt_download_status 0 _entt_download_code)
+        if(NOT _entt_download_code EQUAL 0)
+            list(GET _entt_download_status 1 _entt_download_message)
+            file(REMOVE "${_entt_header}")
+            message(WARNING
+                "Could not download EnTT (${_entt_download_message}). "
+                "Set GLSCRIPT_ENTT_INCLUDE_DIR to a directory containing entt/entt.hpp "
+                "to build the EnTT-based demos.")
+            set(_entt_include_dir "")
         endif()
-    elseif(NOT EXISTS "${GLSCRIPT_ENTT_INCLUDE_DIR}/entt/entt.hpp")
-        message(WARNING
-            "GLSCRIPT_ENTT_INCLUDE_DIR does not contain entt/entt.hpp; skipping entt_demo.")
-        set(_entt_include_dir "")
     endif()
+elseif(NOT EXISTS "${GLSCRIPT_ENTT_INCLUDE_DIR}/entt/entt.hpp")
+    message(WARNING
+        "GLSCRIPT_ENTT_INCLUDE_DIR does not contain entt/entt.hpp; skipping EnTT demos.")
+    set(_entt_include_dir "")
+endif()
 
-    if(_entt_include_dir)
+if(_entt_include_dir)
+    if(GLSCRIPT_BUILD_ENTT_EXAMPLE)
         add_executable(entt_demo
             examples/entt/entt_demo.cpp
             examples/engine_bindings.cpp)
@@ -92,27 +113,28 @@ if(GLSCRIPT_BUILD_ENTT_EXAMPLE)
 
         target_link_libraries(entt_demo PRIVATE glscript)
 
-        # Rendering: system raylib when installed, otherwise a local build
-        # fetched into the build directory. (raylib's installed config
-        # exports the target as `raylib`.)
-        find_package(raylib QUIET)
-        if(raylib_FOUND)
-            target_link_libraries(entt_demo PRIVATE raylib)
-        else()
-            include(FetchContent)
-            set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-            set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
-            FetchContent_Declare(raylib
-                URL https://github.com/raysan5/raylib/archive/refs/tags/6.0.tar.gz)
-            FetchContent_MakeAvailable(raylib)
-            target_link_libraries(entt_demo PRIVATE raylib)
-        endif()
-        target_compile_definitions(entt_demo PRIVATE GLSCRIPT_HAVE_RAYLIB)
-
         # Headless run: the physics is fully scripted, so this exercises the
         # runtime end to end without opening a window.
+        glscript_link_raylib(entt_demo)
         add_test(NAME entt_demo COMMAND entt_demo --headless 240)
     endif()
+
+    add_executable(sandbox_demo
+        examples/sandbox/sandbox_demo.cpp
+        examples/engine_bindings.cpp)
+
+    target_include_directories(sandbox_demo PRIVATE
+        ${_entt_include_dir}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+    target_compile_definitions(sandbox_demo PRIVATE
+        GLSCRIPT_SANDBOX_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/sandbox/sandbox.gl")
+
+    target_link_libraries(sandbox_demo PRIVATE glscript)
+
+    glscript_link_raylib(sandbox_demo)
+
+    add_test(NAME sandbox_demo COMMAND sandbox_demo --headless 300)
 endif()
 
 add_executable(glscript_tests

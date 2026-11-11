@@ -28,6 +28,24 @@ public:
     Value run(const std::string& module_name, const std::string& function_name,
               std::vector<Value> arguments = {});
 
+    // Calls a script method on an object instance with the receiver bound,
+    // dispatching on the instance's runtime type (walking its base chain) —
+    // the embedding entry point for engine-driven lifecycles (behaviour
+    // update(), on_collision(), ...). Entry-point only: like run(), this
+    // must not be called re-entrantly from inside a host thunk.
+    Value call_method(const Value& receiver, const std::string& name,
+                      std::vector<Value> arguments = {});
+
+    // Field access on object instances by name (host-side inspector /
+    // prefab-style reads and writes).
+    Value field(const Value& object, const std::string& name) const;
+    void set_field(const Value& object, const std::string& name, Value value);
+
+    // Roots a value for the lifetime of the Runtime. The GC only scans the
+    // machine state and its own tables — values the host keeps on the C++
+    // side (entity behaviour instances, cached handles) must be retained.
+    void retain(Value value);
+
     // Forces a collection (the engine can call this between frames).
     void gc_collect();
 
@@ -103,6 +121,8 @@ private:
     // GC roots for every captured continuation (they may outlive the stack
     // slots that referenced them, e.g. after a transfer resume).
     std::vector<Value> continuations_;
+    // Values the host explicitly retained (held on the C++ side).
+    std::vector<Value> gc_roots_;
     std::vector<std::vector<Value>> constants_; // per function, strings interned
     Value result_;
     bool failed_ = false;

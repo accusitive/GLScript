@@ -701,6 +701,14 @@ ModuleInfo* CheckerImpl::load_imported_module(const std::string& name, SourceSpa
 ModuleInfo* CheckerImpl::load_source_module(const std::string& name, const std::string& path,
                                             std::string text) {
     if (const auto existing = modules_.find(name); existing != modules_.end()) {
+        if (!existing->second->is_host) {
+            error(SourceSpan{}, "duplicate module '" + name + "'");
+            return existing->second.get();
+        }
+        // A source module must not silently share a host module's name: the
+        // script's declarations would vanish while checking "succeeds".
+        error(SourceSpan{}, "module '" + name +
+                                "' is provided by the host; rename the script file");
         return existing->second.get();
     }
 
