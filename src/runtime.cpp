@@ -888,6 +888,34 @@ void Runtime::execute() {
             stack_.push_back(make_enum(bytecode_.enum_variants[operands[0]], {}));
             break;
 
+        case Op::EnumIsVariant: {
+            const auto value = pop();
+            const bool matches = value.is_heap() &&
+                                 value.as_heap()->kind == GcObject::Kind::Enum &&
+                                 as_enum(value)->variant == bytecode_.enum_variants[operands[0]];
+            stack_.push_back(Value::boolean(matches));
+            break;
+        }
+
+        case Op::EnumPayload: {
+            const auto value = pop();
+            if (!value.is_heap() || value.as_heap()->kind != GcObject::Kind::Enum) {
+                runtime_error(span, "pattern payload access on " + value.type_name());
+                stack_.push_back(Value::unit());
+                break;
+            }
+            const auto* enum_value = as_enum(value);
+            if (operands[0] >= enum_value->payload.size()) {
+                runtime_error(span, "variant '" + enum_value->variant->name +
+                                        "' has no payload at index " +
+                                        std::to_string(operands[0]));
+                stack_.push_back(Value::unit());
+                break;
+            }
+            stack_.push_back(enum_value->payload[operands[0]]);
+            break;
+        }
+
         case Op::EnumCtor: {
             const auto argc = operands[1];
             std::vector<Value> payload(stack_.end() - argc, stack_.end());

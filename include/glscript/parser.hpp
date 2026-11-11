@@ -25,6 +25,7 @@ private:
     std::vector<Token> tokens_;
     std::size_t index_ = 0;
     bool suppress_errors_ = false;
+    bool allow_tail_expression_ = false; // block expressions: last statement needs no ';'
     int loop_depth_ = 0;
 
     const Token& current() const;
@@ -78,9 +79,14 @@ private:
     ast::StmtPtr parse_block();
     ast::StmtPtr parse_statement();
     ast::StmtPtr parse_var_decl();
+    ast::StmtPtr parse_let();
     ast::StmtPtr parse_if();
     ast::StmtPtr parse_while();
     std::unique_ptr<ast::VarDeclStmt> try_parse_var_decl();
+
+    ast::PatternPtr parse_pattern();
+    ast::ExprPtr parse_match_expr();
+    ast::StmtPtr parse_block_expression();
 
     ast::ExprPtr parse_expression();
     ast::ExprPtr parse_logical_or();

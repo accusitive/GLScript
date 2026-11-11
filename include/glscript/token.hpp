@@ -30,6 +30,8 @@ enum class TokenKind {
     KwEnum,
     KwResume,
     KwDynamic,
+    KwMatch,
+    KwLet,
     KwTrue,
     KwFalse,
     KwIf,

@@ -293,6 +293,56 @@ private:
             emit_instruction(Op::EnumVariant, expression.span, {expression.variant_id});
             return;
 
+        case hir::Expr::Kind::EnumPayload:
+            emit_expression(*expression.object);
+            emit_instruction(Op::EnumPayload, expression.span, {expression.payload_index});
+            return;
+
+        case hir::Expr::Kind::Match: {
+            // Arm dispatch: the emitter's version of the lowered test plans.
+            // Tests and guards jump to the next arm on failure; a passing arm
+            // leaves its body's value and jumps past the chain.
+            emit_expression(*expression.scrutinee);
+            emit_instruction(Op::StoreLocal, expression.span, {expression.scrutinee_slot});
+
+            std::vector<std::uint32_t> end_jumps;
+            for (const auto& arm : expression.match_arms) {
+                std::vector<std::uint32_t> next_jumps;
+                for (const auto& test : arm.tests) {
+                    emit_match_term(test, expression.span);
+                    switch (test.kind) {
+                    case hir::MatchTest::Kind::Variant:
+                        emit_instruction(Op::EnumIsVariant, arm.span, {test.variant_id});
+                        next_jumps.push_back(emit_jump(Op::JumpIfFalse, arm.span));
+                        break;
+                    case hir::MatchTest::Kind::Literal:
+                        emit_expression(*test.literal);
+                        emit_instruction(Op::Eq, arm.span);
+                        next_jumps.push_back(emit_jump(Op::JumpIfFalse, arm.span));
+                        break;
+                    case hir::MatchTest::Kind::Bind:
+                        emit_instruction(Op::StoreLocal, arm.span, {test.slot});
+                        break;
+                    }
+                }
+                if (arm.guard != nullptr) {
+                    emit_expression(*arm.guard);
+                    next_jumps.push_back(emit_jump(Op::JumpIfFalse, arm.span));
+                }
+                emit_expression(*arm.body);
+                end_jumps.push_back(emit_jump(Op::Jump, arm.span));
+                for (const auto jump : next_jumps) {
+                    patch(jump, here());
+                }
+            }
+            // No arm matched — reachable only for dynamic scrutinees.
+            emit_instruction(Op::Abort, expression.span);
+            for (const auto jump : end_jumps) {
+                patch(jump, here());
+            }
+            return;
+        }
+
         case hir::Expr::Kind::IntrinsicBinary:
             emit_expression(*expression.lhs);
             emit_expression(*expression.rhs);
@@ -395,10 +445,17 @@ private:
 
         case hir::Expr::Kind::Handle:
             // The handled body is its own function (lowering desugaring): a
-            // raise inside it is exactly one frame above this delimiter.
+            // raise inside it is exactly one frame above this delimiter. The
+            // body is invoked as a closure so it can capture outer locals.
             emit_instruction(Op::PushHandler, expression.span, {expression.table_ref});
-            emit_instruction(Op::CallFunction, expression.span,
-                             {expression.body_fn, 0});
+            for (const auto& capture : expression.captures) {
+                emit_instruction(capture.is_local ? Op::LoadLocal : Op::LoadCapture,
+                                 expression.span, {capture.index});
+            }
+            emit_instruction(Op::Closure, expression.span,
+                             {expression.body_fn,
+                              static_cast<std::uint32_t>(expression.captures.size())});
+            emit_instruction(Op::Call, expression.span, {0});
             emit_instruction(Op::PopHandler, expression.span);
             return;
 
@@ -415,6 +472,15 @@ private:
         }
         for (const auto& argument : expression.args) {
             emit_expression(*argument);
+        }
+    }
+
+    // The value a match test operates on: the scrutinee local, or a payload
+    // slot of an enum value bound by an enclosing variant test.
+    void emit_match_term(const hir::MatchTest& test, const SourceSpan& span) {
+        emit_instruction(Op::LoadLocal, span, {test.value_slot});
+        if (test.term == hir::MatchTest::Term::Payload) {
+            emit_instruction(Op::EnumPayload, span, {test.payload_index});
         }
     }
 
@@ -481,6 +547,8 @@ std::size_t operand_count(Op op) {
     case Op::Call:
     case Op::PushHandler:
     case Op::EnumVariant:
+    case Op::EnumIsVariant:
+    case Op::EnumPayload:
     case Op::GetField:
     case Op::SetField:
     case Op::GetFieldByName:

@@ -686,8 +686,409 @@ function main() {
               "axis=1\nscaled=2 4 6\nshifted=11 22 33\ndt=0.016\nscript=script");
 }
 
-void test_run_string_allocation_gc() {
-    // Enough allocations to trigger several collections.
+// ---------------------------------------------------------------------------
+// Pattern matching: match expressions and let destructuring
+// ---------------------------------------------------------------------------
+
+void test_match_enums() {
+    expect_run("match enums", R"GL(
+enum Shape {
+    Circle(float),
+    Rect(float, float),
+    Point,
+}
+
+function area(s: Shape) -> float {
+    return match s {
+        Shape::Circle(r) => 3.14 * r * r,
+        Shape::Rect(w, h) => { let p = w + h; p * 2.0 },
+        Shape::Point => 0.0,
+    };
+}
+
+function describe(s: Shape) -> String {
+    return match s {
+        Point => "point",
+        Shape::Circle(_) => "circle",
+        Shape::Rect(_, _) => "rect",
+    };
+}
+
+function main() {
+    println(`circle: ${area(Shape::Circle(2.0))}`);
+    println(`rect: ${area(Shape::Rect(3.0, 4.0))}`);
+    println(`point: ${area(Shape::Point)}`);
+    println(describe(Shape::Point));
+    println(describe(Shape::Circle(1.0)));
+    println(describe(Shape::Rect(1.0, 2.0)));
+}
+)GL",
+              "circle: 12.56\nrect: 14\npoint: 0\npoint\ncircle\nrect");
+}
+
+void test_match_literals_and_guards() {
+    expect_run("match literals and guards", R"GL(
+function classify(value: int) -> String {
+    return match value {
+        0 => "zero",
+        -1 => "minus one",
+        n if n < 0 => "negative",
+        n if n < 10 => "small",
+        _ => "large",
+    };
+}
+
+function flag(b: bool) -> String {
+    return match b {
+        true => "yes",
+        false => "no",
+    };
+}
+
+function greet(name: String) -> String {
+    return match name {
+        "world" => "hello world",
+        other => `hi ${other}`,
+    };
+}
+
+function unit_value(u: unit) -> String {
+    return match u {
+        () => "unit",
+    };
+}
+
+function main() {
+    println(classify(0));
+    println(classify(-1));
+    println(classify(-5));
+    println(classify(3));
+    println(classify(42));
+    println(flag(true));
+    println(flag(false));
+    println(greet("world"));
+    println(greet("glscript"));
+    println(unit_value(()));
+}
+)GL",
+              "zero\nminus one\nnegative\nsmall\nlarge\nyes\nno\nhello world\nhi glscript\nunit");
+}
+
+void test_match_nested_and_closures() {
+    expect_run("match nested patterns", R"GL(
+enum Inner {
+    Inner(int),
+    Empty,
+}
+
+enum Outer {
+    Outer(Inner, int),
+    Nothing,
+}
+
+function deep(o: Outer) -> int {
+    return match o {
+        Outer::Outer(Inner::Inner(v), tag) => v * 100 + tag,
+        Outer::Outer(Inner::Empty, _) => -1,
+        Nothing => 0,
+    };
+}
+
+function main() {
+    println(`deep1: ${deep(Outer::Outer(Inner::Inner(3), 7))}`);
+    println(`deep2: ${deep(Outer::Outer(Inner::Empty, 9))}`);
+    println(`deep3: ${deep(Outer::Nothing)}`);
+
+    // Lambdas inside arms capture the pattern bindings.
+    let result = match Outer::Outer(Inner::Inner(4), 1) {
+        Outer::Outer(Inner::Inner(v), tag) => { let f = () => v + tag; f() },
+        _ => -1,
+    };
+    println(`closure arm: ${result}`);
+}
+)GL",
+              "deep1: 307\ndeep2: -1\ndeep3: 0\nclosure arm: 5");
+}
+
+void test_match_tail_and_result_value() {
+    expect_run("match as value", R"GL(
+enum Op {
+    Add,
+    Mul,
+}
+
+function apply(op: Op, a: int, b: int) -> int {
+    let result = match op {
+        Op::Add => a + b,
+        Op::Mul => a * b,
+    };
+    return result;
+}
+
+function main() {
+    println(`add: ${apply(Op::Add, 2, 3)}`);
+    println(`mul: ${apply(Op::Mul, 2, 3)}`);
+
+    // match nested inside a larger expression.
+    println(`nested: ${match Op::Mul { Op::Add => 10, Op::Mul => 20 }}`);
+
+    int doubled = match 21 {
+        x => x * 2,
+    };
+    println(`doubled: ${doubled}`);
+}
+)GL",
+              "add: 5\nmul: 6\nnested: 20\ndoubled: 42");
+}
+
+void test_let_destructuring() {
+    expect_run("let destructuring", R"GL(
+enum Inner {
+    Inner(int, int),
+}
+
+enum Slot {
+    Slot(Inner, int),
+}
+
+function main() {
+    let Slot::Slot(inner, z) = Slot::Slot(Inner::Inner(4, 9), 100);
+    let Inner::Inner(a, b) = inner;
+    println(`a=${a} b=${b} z=${z} sum=${a + b + z}`);
+
+    // Nested destructuring in one pattern.
+    let Slot::Slot(Inner::Inner(x, y), w) = Slot::Slot(Inner::Inner(1, 2), 3);
+    println(`x=${x} y=${y} w=${w}`);
+
+    let n: int = 5;
+    println(`n=${n}`);
+
+    // Binding with annotation destructuring a payload.
+    let Slot::Slot(p: Inner, q) = Slot::Slot(Inner::Inner(7, 8), 9);
+    let Inner::Inner(p0, p1) = p;
+    println(`p0=${p0} p1=${p1} q=${q}`);
+}
+)GL",
+              "a=4 b=9 z=100 sum=113\nx=1 y=2 w=3\nn=5\np0=7 p1=8 q=9");
+}
+
+void test_match_type_errors() {
+    expect_error("match missing variant", R"GL(
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main() {
+    let c = Color::Green;
+    let label = match c {
+        Color::Red => "r",
+        Color::Green => "g",
+    };
+    println(label);
+}
+)GL",
+                  "non-exhaustive match: missing variant");
+
+    expect_error("match non-exhaustive int", R"GL(
+function main() {
+    let label = match 5 {
+        1 => "one",
+        2 => "two",
+    };
+    println(label);
+}
+)GL",
+                  "non-exhaustive match");
+
+    expect_error("let refutable pattern", R"GL(
+enum Maybe {
+    Some(int),
+    None,
+}
+
+function main() {
+    let Maybe::Some(v) = Maybe::Some(3);
+    println(v);
+}
+)GL",
+                  "refutable pattern in 'let'");
+
+    expect_error("let refutable literal", R"GL(
+function main() {
+    let 5 = 5;
+    println("unreachable");
+}
+)GL",
+                  "refutable pattern in 'let'");
+
+    expect_error("variant payload arity", R"GL(
+enum Pair {
+    Pair(int, int),
+}
+
+function main() {
+    let Pair::Pair(a) = Pair::Pair(1, 2);
+    println(a);
+}
+)GL",
+                  "expects 2 payload pattern(s), got 1");
+
+    expect_error("literal pattern on enum", R"GL(
+enum Color {
+    Red,
+}
+
+function main() {
+    let c = Color::Red;
+    match c {
+        1 => println("no"),
+        _ => println("ok"),
+    }
+}
+)GL",
+                  "literal pattern cannot match type");
+
+    expect_error("guarded arm not exhaustive", R"GL(
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main() {
+    let c = Color::Red;
+    let label = match c {
+        Color::Red if c == Color::Green => "r?",
+        Color::Green => "g",
+        Color::Blue => "b",
+    };
+    println(label);
+}
+)GL",
+                  "non-exhaustive match: missing variant");
+
+    expect_error("match guard not bool", R"GL(
+function main() {
+    match 5 {
+        n if n + 1 => println("bad"),
+        _ => println("ok"),
+    }
+}
+)GL",
+                  "match guard must be bool");
+
+    expect_error("match arm type mismatch", R"GL(
+function main() {
+    let v = match 5 {
+        1 => "one",
+        _ => 2,
+    };
+    println(v);
+}
+)GL",
+                  "match arms have incompatible types");
+
+    expect_error("break inside arm block", R"GL(
+function main() {
+    while (true) {
+        match 5 {
+            _ => { break; },
+        }
+    }
+}
+)GL",
+                  "'break' inside a match arm block");
+
+    expect_error("return inside arm block", R"GL(
+function main() {
+    match 5 {
+        _ => { return 1; },
+    }
+}
+)GL",
+                  "'return' inside a match arm block");
+}
+
+void test_match_dynamic_scrutinee() {
+    expect_run("match dynamic", R"GL(
+function main() {
+    dynamic value = 10;
+    let label = match value {
+        10 => "ten",
+        s: String => `text ${s}`,
+        _ => "other",
+    };
+    println(label);
+
+    dynamic text = "abc";
+    println(match text {
+        s: String => `len ${s}`,
+        _ => "not text",
+    });
+}
+)GL",
+              "ten\nlen abc");
+}
+
+void test_match_effects_and_captures() {
+    expect_run("match inside handlers and captures", R"GL(
+effect Ask {
+    function ask(n: int) -> int;
+}
+
+enum Op {
+    Add,
+    Mul,
+}
+
+function compute(op: Op, x: int, y: int) -> int {
+    return match op {
+        Op::Add => x + y,
+        Op::Mul => handle Ask::ask(x) with {
+            function Ask::ask(n: int) -> int {
+                // resume transfers: the parenthesized value is delivered to
+                // the raise site and the delimiter receives the
+                // continuation's result (code after a resume does not run).
+                return match n {
+                    0 => resume 0,
+                    k => resume (k * 2),
+                };
+            }
+        },
+    };
+}
+
+function main() {
+    println(`compute: ${compute(Op::Add, 2, 5)} ${compute(Op::Mul, 0, 7)} ${compute(Op::Mul, 3, 7)}`);
+    println(`shadowing: ${match 2 { n => { let n = n * 10; n }, _ => 0 }}`);
+}
+)GL",
+              "compute: 7 0 6\nshadowing: 20");
+}
+
+void test_handler_case_capture_rejected() {
+    // Handler cases run as plain functions with no closure object, so a
+    // reference to an outer variable would crash the interpreter (previously
+    // silently compiled and aborted at runtime).
+    expect_error("handler case capture rejected", R"GL(
+effect Ask {
+    function ask(n: int) -> int;
+}
+
+function f(x: int, y: int) -> int {
+    return handle Ask::ask(x) with {
+        function Ask::ask(n: int) -> int {
+            return resume n * y;
+        }
+    };
+}
+)GL",
+                  "handler cases cannot reference outer variables");
+}
+
+void test_run_string_allocation_gc() {    // Enough allocations to trigger several collections.
     expect_run("run_gc", R"GL(
 function main() {
     int i = 0;
@@ -916,6 +1317,16 @@ int main() {  // NOLINT(readability-function-size)
     test_run_handler_decl_evaluates_body();
     test_run_host_calls();
     test_run_string_allocation_gc();
+
+    test_match_enums();
+    test_match_literals_and_guards();
+    test_match_nested_and_closures();
+    test_match_tail_and_result_value();
+    test_let_destructuring();
+    test_match_type_errors();
+    test_match_dynamic_scrutinee();
+    test_match_effects_and_captures();
+    test_handler_case_capture_rejected();
 
     std::cout << "\n" << passes << " passed, " << failures << " failed\n";
     return failures == 0 ? 0 : 1;

@@ -1,12 +1,34 @@
 # Pattern matching plan: `match` expressions and `let` destructuring
 
-Status: **planned** (this commit lands the design; implementation follows).
+Status: **implemented** (landed 2026-11-11; deviations from the design below).
 
 Rust-style pattern matching over glscript's enums (and literals), following the
 HIR-refactor playbook: the checker resolves and validates everything once, the
 lowering turns patterns into a flat, fully-resolved test plan, and the emitter
 compiles that plan mechanically with the same jump patching it already does for
 `if`/`while`.
+
+Deviations from the original design:
+
+- **Block arm bodies compile as immediate closures** (`ast::BlockExpr` lowered
+  to a zero-argument lambda called on the spot). Consequently `break`,
+  `continue`, and `return` cannot cross an arm block's value boundary — the
+  checker rejects them with dedicated messages.
+- **Exhaustiveness is finer than planned**: bool matches are exhaustive over
+  `true`/`false` literal arms, and `()` covers a unit scrutinee.
+- **Guarded arms never count toward exhaustiveness** (a guard can fail at
+  runtime — Rust's rule). An all-guarded match is a checker error, so the
+  emitter's no-match `Abort` is unreachable for well-typed programs and exists
+  only as a safety net.
+- Two pre-existing crashes found while testing were fixed (see status.md):
+  handled expressions and handler cases referencing outer variables. Handle
+  bodies now compile as real closures (captures bound at install time);
+  handler-case captures are rejected by the checker (handler cases run as
+  plain functions invoked by the runtime).
+- Calling a function value held in a variable (`f()`) never bound the callee —
+  fixed in `resolve_callee`.
+- `resume` inside match arms works, subject to the existing transfer-resume
+  semantics (code after a resume in a case does not execute).
 
 ## 1. Grammar
 

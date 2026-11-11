@@ -140,6 +140,7 @@ void Parser::synchronize_statement() {
         case TokenKind::KwIf:
         case TokenKind::KwElse:
         case TokenKind::KwWhile:
+        case TokenKind::KwLet:
         case TokenKind::KwReturn:
         case TokenKind::KwBreak:
         case TokenKind::KwContinue:
@@ -775,6 +776,189 @@ ast::StmtPtr Parser::parse_var_decl() {
     return declaration;
 }
 
+// `let pattern = expr;` — pattern destructuring. The binding name's `: type`
+// annotation is parsed by parse_pattern (bare bindings only).
+ast::StmtPtr Parser::parse_let() {
+    const auto begin = consume(TokenKind::KwLet, "expected 'let'");
+
+    auto declaration = std::make_unique<ast::VarDeclStmt>();
+    declaration->pattern = parse_pattern();
+
+    consume(TokenKind::Equal, "expected '=' after let pattern");
+    declaration->initializer = parse_expression();
+    consume(TokenKind::Semicolon, "expected ';' after let declaration");
+    declaration->span = span_from(begin);
+    return declaration;
+}
+
+ast::PatternPtr Parser::parse_pattern() {
+    const auto begin = current();
+
+    if (match(TokenKind::Underscore)) {
+        return make_node<ast::WildcardPattern>(span_from(begin));
+    }
+
+    // Negative numeric literals.
+    if (at(TokenKind::Minus)) {
+        advance();
+        if (at(TokenKind::Integer) || at(TokenKind::Float)) {
+            const auto literal_token = advance();
+            auto pattern = make_node<ast::LiteralPattern>(span_from(begin));
+            auto unary = make_node<ast::UnaryExpr>(span_from(begin));
+            unary->op = "-";
+            if (literal_token.kind == TokenKind::Integer) {
+                auto literal = make_node<ast::IntLiteralExpr>(literal_token.span);
+                literal->text = literal_token.text;
+                unary->operand = std::move(literal);
+            } else {
+                auto literal = make_node<ast::FloatLiteralExpr>(literal_token.span);
+                literal->text = literal_token.text;
+                unary->operand = std::move(literal);
+            }
+            pattern->value = std::move(unary);
+            return pattern;
+        }
+        error(current(), "expected numeric literal after '-' in pattern");
+        advance();
+        return make_node<ast::ErrorPattern>(span_from(begin));
+    }
+
+    if (at(TokenKind::Integer) || at(TokenKind::Float) || at(TokenKind::String) ||
+        at(TokenKind::KwTrue) || at(TokenKind::KwFalse)) {
+        const auto token = advance();
+        auto pattern = make_node<ast::LiteralPattern>(span_from(begin));
+        switch (token.kind) {
+        case TokenKind::Integer: {
+            auto literal = make_node<ast::IntLiteralExpr>(token.span);
+            literal->text = token.text;
+            pattern->value = std::move(literal);
+            break;
+        }
+        case TokenKind::Float: {
+            auto literal = make_node<ast::FloatLiteralExpr>(token.span);
+            literal->text = token.text;
+            pattern->value = std::move(literal);
+            break;
+        }
+        case TokenKind::String: {
+            auto literal = make_node<ast::StringLiteralExpr>(token.span);
+            literal->value = token.text;
+            pattern->value = std::move(literal);
+            break;
+        }
+        case TokenKind::KwTrue:
+        case TokenKind::KwFalse: {
+            auto literal = make_node<ast::BoolLiteralExpr>(token.span);
+            literal->value = token.kind == TokenKind::KwTrue;
+            pattern->value = std::move(literal);
+            break;
+        }
+        default:
+            break;
+        }
+        return pattern;
+    }
+
+    // Unit literal pattern.
+    if (at(TokenKind::LParen) && peek().kind == TokenKind::RParen) {
+        advance();
+        advance();
+        auto pattern = make_node<ast::LiteralPattern>(span_from(begin));
+        pattern->value = make_node<ast::UnitLiteralExpr>(span_from(begin));
+        return pattern;
+    }
+
+    if (at(TokenKind::Identifier)) {
+        auto path = parse_path();
+
+        // Variant pattern with payload: `Enum::Variant(p0, p1)` or `Variant(p)`.
+        if (match(TokenKind::LParen)) {
+            auto pattern = make_node<ast::VariantPattern>(span_from(begin));
+            pattern->path = std::move(path);
+            if (!at(TokenKind::RParen)) {
+                while (true) {
+                    pattern->payload.push_back(parse_pattern());
+                    if (!match(TokenKind::Comma)) {
+                        break;
+                    }
+                    if (at(TokenKind::RParen)) {
+                        break; // trailing comma
+                    }
+                }
+            }
+            consume(TokenKind::RParen, "expected ')' after variant payload patterns");
+            pattern->span = span_from(begin);
+            return pattern;
+        }
+
+        // Bare name: a binding, or a payload-less variant of the expected enum
+        // type — the checker decides. `: type` annotates a binding.
+        if (path.size() == 1) {
+            auto pattern = make_node<ast::BindingPattern>(span_from(begin));
+            pattern->name = path.front();
+            if (match(TokenKind::Colon)) {
+                pattern->annotation = parse_type();
+            }
+            pattern->span = span_from(begin);
+            return pattern;
+        }
+
+        // Qualified payload-less variant: `Enum::Variant` or `Module::Enum::Variant`.
+        auto pattern = make_node<ast::VariantPattern>(span_from(begin));
+        pattern->path = std::move(path);
+        pattern->span = span_from(begin);
+        return pattern;
+    }
+
+    error(current(), "expected pattern");
+    advance();
+    return make_node<ast::ErrorPattern>(span_from(begin));
+}
+
+ast::ExprPtr Parser::parse_match_expr() {
+    const auto begin = consume(TokenKind::KwMatch, "expected 'match'");
+
+    auto expression = make_node<ast::MatchExpr>(begin.span);
+    expression->scrutinee = parse_expression();
+    consume(TokenKind::LBrace, "expected '{' to start match arms");
+
+    while (!at(TokenKind::RBrace) && !at_end()) {
+        const auto arm_begin = current();
+        ast::MatchArm arm;
+        arm.pattern = parse_pattern();
+
+        if (match(TokenKind::KwIf)) {
+            arm.guard = parse_expression();
+        }
+
+        consume(TokenKind::FatArrow, "expected '=>' after match pattern");
+
+        if (at(TokenKind::LBrace)) {
+            // Block body: value is the block's tail expression.
+            auto block_expression = make_node<ast::BlockExpr>(current().span);
+            block_expression->body = parse_block_expression();
+            arm.body = std::move(block_expression);
+        } else {
+            arm.body = parse_expression();
+        }
+
+        arm.span = span_from(arm_begin);
+        expression->arms.push_back(std::move(arm));
+
+        // A comma separates arms; optional after a block body and before '}'.
+        if (match(TokenKind::Comma)) {
+            continue;
+        }
+        if (at(TokenKind::RBrace)) {
+            break;
+        }
+    }
+
+    consume(TokenKind::RBrace, "expected '}' to close match arms");
+    expression->span = span_from(begin);
+    return expression;
+}
+
 std::unique_ptr<ast::VarDeclStmt> Parser::try_parse_var_decl() {
     const auto saved_index = index_;
 
@@ -856,6 +1040,10 @@ ast::StmtPtr Parser::parse_statement() {
         return parse_while();
     }
 
+    if (at(TokenKind::KwLet)) {
+        return parse_let();
+    }
+
     if (match(TokenKind::KwReturn)) {
         const auto begin = previous();
         auto statement = make_node<ast::ReturnStmt>(begin.span);
@@ -897,15 +1085,29 @@ ast::StmtPtr Parser::parse_statement() {
     statement->expression = std::move(expression);
 
     const bool tail_resume =
-        dynamic_cast<ast::ResumeExpr*>(statement->expression.get()) != nullptr &&
+        (dynamic_cast<ast::ResumeExpr*>(statement->expression.get()) != nullptr ||
+         dynamic_cast<ast::MatchExpr*>(statement->expression.get()) != nullptr) &&
         at(TokenKind::RBrace);
+    // In a block expression (`=> { ... }`), the last statement may be a bare
+    // expression — the block's value.
+    const bool tail_block_value = allow_tail_expression_ && at(TokenKind::RBrace);
 
-    if (!tail_resume) {
+    if (!tail_resume && !tail_block_value) {
         consume(TokenKind::Semicolon, "expected ';' after expression");
     }
 
     statement->span = span_from(begin);
     return statement;
+}
+
+// A statement block in expression position: its last statement may be a bare
+// expression, which becomes the block's value.
+ast::StmtPtr Parser::parse_block_expression() {
+    const auto saved_tail = allow_tail_expression_;
+    allow_tail_expression_ = true;
+    auto block = parse_block();
+    allow_tail_expression_ = saved_tail;
+    return block;
 }
 
 ast::ExprPtr Parser::parse_expression() {
@@ -1290,6 +1492,10 @@ ast::ExprPtr Parser::parse_primary() {
 
     if (at(TokenKind::KwHandle)) {
         return parse_handle_expr();
+    }
+
+    if (at(TokenKind::KwMatch)) {
+        return parse_match_expr();
     }
 
     const auto token = current();

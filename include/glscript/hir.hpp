@@ -53,6 +53,42 @@ struct CaptureRef {
     std::uint32_t index = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Pattern dispatch (Expr::Kind::Match)
+//
+// A pattern is a conjunction of primitive tests and bindings — nested payload
+// patterns just append more conjuncts — so each arm lowers to a flat test
+// plan. A test operates on a *term*: the scrutinee local, or a payload slot
+// of an enum-value local bound by an enclosing variant test.
+// ---------------------------------------------------------------------------
+
+struct MatchTest {
+    enum class Kind {
+        Variant,  // term's variant must equal variant_id
+        Literal,  // term must equal the pre-built literal value node
+        Bind,     // store the term's value into slot
+    };
+    enum class Term {
+        Scrutinee,  // the match's scrutinee local
+        Payload,    // payload[payload_index] of the enum value in value_slot
+    };
+
+    Kind kind = Kind::Bind;
+    Term term = Term::Scrutinee;
+    std::uint32_t value_slot = 0;   // Payload: the enum-value local
+    std::uint32_t payload_index = 0;
+    std::uint32_t variant_id = 0;   // Variant
+    ExprPtr literal;                // Literal: pre-built value node
+    std::uint32_t slot = 0;         // Bind: destination local
+};
+
+struct MatchArm {
+    std::vector<MatchTest> tests;   // all must pass
+    ExprPtr guard;                  // null when absent
+    ExprPtr body;                   // pre-lowered; leaves the arm's value
+    SourceSpan span;
+};
+
 struct Expr {
     enum class Kind {
         // Literals — values inline in the node.
@@ -77,6 +113,8 @@ struct Expr {
         Closure,         // lambda value
         Resume,          // continuation + value on stack
         Handle,          // PushHandler / call body function / PopHandler
+        Match,           // pattern dispatch; emitter does the jump patching
+        EnumPayload,     // payload[index] of an enum value (pattern bindings)
         Abort,           // builtin `abort(...)`: fatal, never returns
     };
 
@@ -135,6 +173,17 @@ struct Expr {
     // Handle.
     std::uint32_t body_fn = 0;
     std::uint32_t table_ref = 0;
+    // `captures` (shared with Closure) carries the body function's capture
+    // refs: the emitter builds the body as a closure so the handled
+    // expression can reference outer locals.
+
+    // EnumPayload.
+    std::uint32_t payload_index = 0;
+
+    // Match.
+    ExprPtr scrutinee;              // evaluated once, stored into scrutinee_slot
+    std::uint32_t scrutinee_slot = 0;
+    std::vector<MatchArm> match_arms;
 
     // Argument lists / operands.
     std::vector<ExprPtr> args;   // Call, CallValue, Raise, EnumNew, OperatorCall
@@ -176,7 +225,7 @@ struct Function {
     std::string name;
     std::string qualified_name;
     enum class Origin {
-        Function, Method, Lambda, HandlerCase, HandleBody, ModuleInit,
+        Function, Method, Lambda, Block, HandlerCase, HandleBody, ModuleInit,
     };
     Origin origin;
     bool has_receiver = false;           // methods: slot 0 is the receiver

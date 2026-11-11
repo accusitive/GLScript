@@ -203,10 +203,12 @@ private:
 
     Scope* global_scope_ = nullptr;
     Scope* current_scope_ = nullptr;
+    Scope* handler_case_scope_ = nullptr; // innermost handler case being checked
     ModuleInfo* current_module_ = nullptr;
     std::vector<std::string> current_type_parameters_;
     TypePtr current_result_;
     int loop_depth_ = 0;
+    int block_arm_depth_ = 0; // inside a match arm's block body (compiled as a closure)
     std::vector<HandlerContext> handlers_;
     bool host_setup_ = false;
 
@@ -218,6 +220,10 @@ private:
     TypeSymbol* find_type_by_qualified(const std::string& name) const;
     Symbol* lookup_value(const std::string& name) const;
     void define_value(const std::string& name, Symbol symbol, SourceSpan span);
+    // True when `name` resolves within the current handler case (its own
+    // parameters or deeper); false when the reference would need a capture,
+    // which handler-case functions cannot have.
+    bool reference_escapes_handler_case(const std::string& name) const;
 
     void setup_host();
     void create_host_type_placeholders();
@@ -271,6 +277,28 @@ private:
     TypePtr check_resume(const ast::ResumeExpr& expression);
     TypePtr check_handler_case(const ast::HandlerCase& handler_case, TypeSymbol* default_effect,
                                const TypePtr& handler_result);
+
+    // Pattern matching (match arms, let destructuring).
+    struct PatternCoverage {
+        bool catch_all = false;
+        std::vector<const EnumVariantSymbol*> covered;
+        bool covered_true = false;  // literal `true` on a bool scrutinee
+        bool covered_false = false; // literal `false` on a bool scrutinee
+    };
+    TypeSymbol* enum_type_of(const TypePtr& type) const;
+    EnumVariantSymbol* resolve_pattern_variant(const std::vector<std::string>& path,
+                                               const TypePtr& expected) const;
+    EnumVariantSymbol* check_pattern(const ast::Pattern& pattern, const TypePtr& expected,
+                                     bool bare_names_bind);
+    void note_pattern_coverage(const ast::Pattern& pattern, EnumVariantSymbol* resolved,
+                               bool has_guard, const TypePtr& expected,
+                               PatternCoverage& coverage) const;
+    void check_match_exhaustiveness(const ast::MatchExpr& expression, const TypePtr& scrutinee,
+                                    const PatternCoverage& coverage);
+    bool pattern_is_irrefutable(const ast::Pattern& pattern, const TypePtr& expected,
+                                bool bare_names_bind) const;
+    TypePtr check_match(const ast::MatchExpr& expression);
+    TypePtr check_block_expr(const ast::BlockExpr& expression);
 
     Callee resolve_callee(const ast::Expr& callee);
     TypePtr check_function_call(const ast::CallExpr& expression, FunctionSymbol& function,
@@ -354,6 +382,21 @@ void CheckerImpl::define_value(const std::string& name, Symbol symbol, SourceSpa
         return;
     }
     current_scope_->values.emplace(name, std::move(symbol));
+}
+
+bool CheckerImpl::reference_escapes_handler_case(const std::string& name) const {
+    if (handler_case_scope_ == nullptr) {
+        return false;
+    }
+    for (auto* scope = current_scope_; scope != nullptr; scope = scope->parent) {
+        if (scope->values.contains(name)) {
+            return false;
+        }
+        if (scope == handler_case_scope_) {
+            return true;
+        }
+    }
+    return false; // module-level or global symbol: no capture needed
 }
 
 // ---------------------------------------------------------------------------
@@ -1514,6 +1557,48 @@ TypePtr CheckerImpl::check_statement(const ast::Stmt& statement) {
     }
 
     if (const auto* declaration = dynamic_cast<const ast::VarDeclStmt*>(&statement)) {
+        // `let` destructuring: a pattern whose bindings take the initializer's
+        // value. Bare names always declare variables here (never variants);
+        // patterns must be irrefutable.
+        if (declaration->pattern != nullptr) {
+            if (declaration->initializer == nullptr) {
+                error(declaration->span, "'let' pattern declarations require an initializer");
+                return types::unit();
+            }
+
+            const auto initializer_type = check_expression(*declaration->initializer);
+
+            // The type the pattern matches against: an annotated binding uses
+            // its annotation; a variant pattern falls back to the variant's
+            // enum type when the initializer doesn't already name it.
+            TypePtr expected = initializer_type;
+            if (const auto* binding =
+                    dynamic_cast<const ast::BindingPattern*>(declaration->pattern.get());
+                binding != nullptr && binding->annotation != nullptr) {
+                expected = resolve_type(*binding->annotation);
+            } else if (const auto* variant_pattern =
+                           dynamic_cast<const ast::VariantPattern*>(declaration->pattern.get());
+                       variant_pattern != nullptr && initializer_type->kind != Type::Kind::Named) {
+                if (auto* variant =
+                        resolve_pattern_variant(variant_pattern->path, initializer_type);
+                    variant != nullptr) {
+                    expected = variant->value_type;
+                }
+            }
+
+            check_pattern(*declaration->pattern, expected, false);
+            if (!pattern_is_irrefutable(*declaration->pattern, expected, false)) {
+                error(declaration->pattern->span,
+                      "refutable pattern in 'let'; use 'match' for refutable patterns");
+            }
+            if (!is_assignable(initializer_type, expected)) {
+                error(declaration->initializer->span,
+                      "cannot initialize pattern of type " + expected->to_string() + " with " +
+                          initializer_type->to_string());
+            }
+            return types::unit();
+        }
+
         const auto type =
             declaration->type != nullptr ? resolve_type(*declaration->type) : types::error();
 
@@ -1546,6 +1631,12 @@ TypePtr CheckerImpl::check_statement(const ast::Stmt& statement) {
     }
 
     if (const auto* return_statement = dynamic_cast<const ast::ReturnStmt*>(&statement)) {
+        if (block_arm_depth_ > 0) {
+            error(return_statement->span,
+                  "'return' inside a match arm block is not supported; "
+                  "use the block's tail expression");
+            return types::never();
+        }
         if (current_result_ == nullptr) {
             error(return_statement->span, "'return' is only valid inside a function");
             return types::never();
@@ -1590,6 +1681,12 @@ TypePtr CheckerImpl::check_statement(const ast::Stmt& statement) {
     }
 
     if (dynamic_cast<const ast::BreakStmt*>(&statement) != nullptr) {
+        if (block_arm_depth_ > 0) {
+            error(statement.span,
+                  "'break' inside a match arm block is not supported; "
+                  "it cannot cross the arm's value boundary");
+            return types::never();
+        }
         if (loop_depth_ == 0) {
             error(statement.span, "'break' is only valid inside a loop");
         }
@@ -1597,6 +1694,12 @@ TypePtr CheckerImpl::check_statement(const ast::Stmt& statement) {
     }
 
     if (dynamic_cast<const ast::ContinueStmt*>(&statement) != nullptr) {
+        if (block_arm_depth_ > 0) {
+            error(statement.span,
+                  "'continue' inside a match arm block is not supported; "
+                  "it cannot cross the arm's value boundary");
+            return types::never();
+        }
         if (loop_depth_ == 0) {
             error(statement.span, "'continue' is only valid inside a loop");
         }
@@ -1626,6 +1729,15 @@ TypePtr CheckerImpl::check_identifier(const ast::IdentifierExpr& expression) {
         if (auto* symbol = lookup_value(name); symbol != nullptr) {
             switch (symbol->kind) {
             case Symbol::Kind::Variable:
+                // Receiver fields load through `this` (no capture needed);
+                // everything else would require a capture, which handler-case
+                // functions cannot have.
+                if (symbol->field == nullptr && reference_escapes_handler_case(name)) {
+                    error(expression.span,
+                          "handler cases cannot reference outer variables (they run as plain "
+                          "functions with no captures); pass the value as a parameter");
+                    return types::error();
+                }
                 bind(expression, [&] {
                     Binding binding;
                     binding.kind = BindingKind::Variable;
@@ -1817,8 +1929,24 @@ CheckerImpl::Callee CheckerImpl::resolve_callee(const ast::Expr& callee) {
                 }());
             } else if (symbol->kind == Symbol::Kind::Variable &&
                        symbol->type->kind == Type::Kind::Function) {
+                if (symbol->field == nullptr &&
+                    reference_escapes_handler_case(identifier->path.front())) {
+                    error(callee.span,
+                          "handler cases cannot reference outer variables (they run as plain "
+                          "functions with no captures); pass the value as a parameter");
+                    return {};
+                }
                 result.kind = Callee::Kind::Value;
                 result.value_type = symbol->type;
+                // Bind so the lowering pass loads the value instead of
+                // treating the name as an unresolvable reference.
+                bind(*identifier, [&] {
+                    Binding binding;
+                    binding.kind = BindingKind::Variable;
+                    binding.type = symbol->type;
+                    binding.field = symbol->field;
+                    return binding;
+                }());
             } else {
                 error(callee.span, "'" + identifier->path.front() + "' is not callable");
             }
@@ -2376,8 +2504,10 @@ TypePtr CheckerImpl::check_handler_case(const ast::HandlerCase& handler_case,
     const auto saved_scope = current_scope_;
     const auto saved_result = current_result_;
     const auto saved_loop_depth = loop_depth_;
+    const auto saved_handler_case_scope = handler_case_scope_;
     auto* handler_scope = make_scope(saved_scope);
     current_scope_ = handler_scope;
+    handler_case_scope_ = handler_scope;
     // A `return` inside a handler case produces the operation's result (the
     // value delivered at the raise site when the case does not resume).
     current_result_ = operation.result;
@@ -2423,6 +2553,7 @@ TypePtr CheckerImpl::check_handler_case(const ast::HandlerCase& handler_case,
     current_scope_ = saved_scope;
     current_result_ = saved_result;
     loop_depth_ = saved_loop_depth;
+    handler_case_scope_ = saved_handler_case_scope;
     return types::unit();
 }
 
@@ -2432,6 +2563,393 @@ TypePtr CheckerImpl::check_handle(const ast::HandleExpr& expression) {
         check_handler_case(handler_case, nullptr, body_type);
     }
     return body_type;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern matching
+// ---------------------------------------------------------------------------
+
+TypeSymbol* CheckerImpl::enum_type_of(const TypePtr& type) const {
+    if (type == nullptr || type->kind != Type::Kind::Named) {
+        return nullptr;
+    }
+    auto* symbol = find_type_by_qualified(type->name);
+    return symbol != nullptr && symbol->kind == TypeSymbol::Kind::Enum ? symbol : nullptr;
+}
+
+// Resolves a pattern's variant path. A bare name only resolves against an
+// expected enum type (the match-arm resolution rule); qualified paths
+// (`Enum::Variant`, `Module::Enum::Variant`) resolve globally.
+EnumVariantSymbol* CheckerImpl::resolve_pattern_variant(const std::vector<std::string>& path,
+                                                        const TypePtr& expected) const {
+    if (path.empty()) {
+        return nullptr;
+    }
+
+    if (path.size() == 1) {
+        if (auto* enum_type = enum_type_of(expected); enum_type != nullptr) {
+            const auto it = enum_type->variants.find(path.front());
+            return it != enum_type->variants.end() ? it->second : nullptr;
+        }
+        return nullptr;
+    }
+
+    std::vector<std::string> owner_path(path.begin(), path.end() - 1);
+    auto* owner = find_type_by_qualified(join_path(owner_path));
+    if (owner == nullptr && owner_path.size() == 1) {
+        owner = lookup_type(owner_path.front());
+    }
+    if (owner == nullptr) {
+        return nullptr;
+    }
+    const auto it = owner->variants.find(path.back());
+    return it != owner->variants.end() ? it->second : nullptr;
+}
+
+// Checks one pattern against `expected`, defining its bindings in the current
+// scope. `bare_names_bind` is false for `let`, where a bare name always
+// declares a variable (never resolves to a variant). Returns the resolved
+// variant symbol for variant-shaped patterns (or nullptr).
+EnumVariantSymbol* CheckerImpl::check_pattern(const ast::Pattern& pattern, const TypePtr& expected,
+                                              bool bare_names_bind) {
+    if (dynamic_cast<const ast::ErrorPattern*>(&pattern) != nullptr ||
+        dynamic_cast<const ast::WildcardPattern*>(&pattern) != nullptr) {
+        return nullptr;
+    }
+
+    if (const auto* binding = dynamic_cast<const ast::BindingPattern*>(&pattern)) {
+        // A bare name that names a variant of the expected enum type matches
+        // that variant instead of declaring a variable.
+        if (bare_names_bind) {
+            if (auto* variant = resolve_pattern_variant({binding->name}, expected);
+                variant != nullptr) {
+                if (!variant->payload.empty()) {
+                    error(pattern.span,
+                          "variant '" + variant->owner->qualified_name + "::" + variant->name +
+                              "' carries a payload; write " + variant->name + "(pattern)");
+                    return variant;
+                }
+                binding->variant = variant;
+                return variant;
+            }
+        }
+
+        TypePtr type = expected;
+        if (binding->annotation != nullptr) {
+            type = resolve_type(*binding->annotation);
+            if (!is_assignable(expected, type) && !is_assignable(type, expected)) {
+                error(pattern.span,
+                      "binding '" + binding->name + "' of type " + type->to_string() +
+                          " cannot match " + expected->to_string());
+            }
+        }
+
+        Symbol symbol;
+        symbol.kind = Symbol::Kind::Variable;
+        symbol.type = type;
+        define_value(binding->name, std::move(symbol), pattern.span);
+        return nullptr;
+    }
+
+    if (const auto* literal = dynamic_cast<const ast::LiteralPattern*>(&pattern)) {
+        if (expected->kind == Type::Kind::Named) {
+            error(pattern.span, "literal pattern cannot match type " + expected->to_string() +
+                                    "; use variant patterns for enums");
+            return nullptr;
+        }
+
+        TypePtr literal_type = types::error();
+        if (const auto* value = literal->value.get(); value != nullptr) {
+            if (dynamic_cast<const ast::IntLiteralExpr*>(value) != nullptr) {
+                literal_type = types::integer();
+            } else if (dynamic_cast<const ast::FloatLiteralExpr*>(value) != nullptr) {
+                literal_type = types::floating();
+            } else if (dynamic_cast<const ast::BoolLiteralExpr*>(value) != nullptr) {
+                literal_type = types::boolean();
+            } else if (dynamic_cast<const ast::StringLiteralExpr*>(value) != nullptr) {
+                literal_type = types::string();
+            } else if (dynamic_cast<const ast::UnitLiteralExpr*>(value) != nullptr) {
+                literal_type = types::unit();
+            } else if (const auto* unary = dynamic_cast<const ast::UnaryExpr*>(value);
+                       unary != nullptr && unary->op == "-") {
+                literal_type = unary->operand != nullptr &&
+                                       dynamic_cast<const ast::FloatLiteralExpr*>(
+                                           unary->operand.get()) != nullptr
+                                   ? types::floating()
+                                   : types::integer();
+            }
+        }
+
+        const bool matches =
+            expected->is_error() || expected->is_dynamic() ||
+            (expected->is_builtin(BuiltinType::Int) && literal_type->is_builtin(BuiltinType::Int)) ||
+            (expected->is_builtin(BuiltinType::Float) &&
+             (literal_type->is_builtin(BuiltinType::Int) ||
+              literal_type->is_builtin(BuiltinType::Float))) ||
+            (expected->is_builtin(BuiltinType::Bool) &&
+             literal_type->is_builtin(BuiltinType::Bool)) ||
+            (expected->is_builtin(BuiltinType::String) &&
+             literal_type->is_builtin(BuiltinType::String)) ||
+            (expected->is_builtin(BuiltinType::Unit) && literal_type->is_builtin(BuiltinType::Unit));
+        if (!matches) {
+            error(pattern.span, "literal pattern of type " + literal_type->to_string() +
+                                    " cannot match " + expected->to_string());
+        }
+        return nullptr;
+    }
+
+    if (const auto* variant_pattern = dynamic_cast<const ast::VariantPattern*>(&pattern)) {
+        auto* variant = resolve_pattern_variant(variant_pattern->path, expected);
+        if (variant == nullptr) {
+            if (variant_pattern->path.size() == 1) {
+                error(pattern.span,
+                      "unknown variant '" + variant_pattern->path.front() + "' for type " +
+                          expected->to_string() +
+                          " (bare variant patterns need an enum scrutinee; use a qualified "
+                          "path on 'dynamic')");
+            } else {
+                error(pattern.span,
+                      "unknown variant '" + join_path(variant_pattern->path) + "'");
+            }
+            return nullptr;
+        }
+        variant_pattern->variant = variant;
+
+        if (expected->kind == Type::Kind::Named &&
+            expected->name != variant->owner->qualified_name) {
+            error(pattern.span, "variant '" + join_path(variant_pattern->path) +
+                                    "' does not match type " + expected->to_string());
+            return variant;
+        }
+
+        if (variant_pattern->payload.size() != variant->payload.size()) {
+            error(pattern.span, "variant '" + variant->owner->qualified_name + "::" +
+                                    variant->name + "' expects " +
+                                    std::to_string(variant->payload.size()) +
+                                    " payload pattern(s), got " +
+                                    std::to_string(variant_pattern->payload.size()));
+            return variant;
+        }
+
+        const auto bindings = class_bindings(*variant->owner, expected);
+        for (std::size_t i = 0; i < variant_pattern->payload.size(); ++i) {
+            check_pattern(*variant_pattern->payload[i], substitute(variant->payload[i], bindings),
+                          bare_names_bind);
+        }
+        return variant;
+    }
+
+    error(pattern.span, "unsupported pattern");
+    return nullptr;
+}
+
+// A guarded arm never counts toward exhaustiveness: the guard can fail at
+// runtime, so the arm might match nothing (the same rule Rust uses).
+void CheckerImpl::note_pattern_coverage(const ast::Pattern& pattern, EnumVariantSymbol* resolved,
+                                        bool has_guard, const TypePtr& expected,
+                                        PatternCoverage& coverage) const {
+    if (has_guard) {
+        return;
+    }
+    if (dynamic_cast<const ast::WildcardPattern*>(&pattern) != nullptr ||
+        dynamic_cast<const ast::ErrorPattern*>(&pattern) != nullptr) {
+        coverage.catch_all = true;
+        return;
+    }
+    if (resolved != nullptr) {
+        coverage.covered.push_back(resolved);
+        return;
+    }
+    if (const auto* literal = dynamic_cast<const ast::LiteralPattern*>(&pattern)) {
+        if (literal->value != nullptr) {
+            // `()` on a unit scrutinee always matches; bool literals cover
+            // their value on a bool scrutinee.
+            if (expected->is_builtin(BuiltinType::Unit) &&
+                dynamic_cast<const ast::UnitLiteralExpr*>(literal->value.get()) != nullptr) {
+                coverage.catch_all = true;
+                return;
+            }
+            if (expected->is_builtin(BuiltinType::Bool)) {
+                if (const auto* bool_literal =
+                        dynamic_cast<const ast::BoolLiteralExpr*>(literal->value.get())) {
+                    (bool_literal->value ? coverage.covered_true : coverage.covered_false) = true;
+                }
+            }
+        }
+        return;
+    }
+    // A bare-name binding arm always matches; other literals cover nothing.
+    if (dynamic_cast<const ast::BindingPattern*>(&pattern) != nullptr) {
+        coverage.catch_all = true;
+    }
+}
+
+void CheckerImpl::check_match_exhaustiveness(const ast::MatchExpr& expression,
+                                             const TypePtr& scrutinee,
+                                             const PatternCoverage& coverage) {
+    if (coverage.catch_all || scrutinee->is_error()) {
+        return;
+    }
+
+    if (auto* enum_type = enum_type_of(scrutinee); enum_type != nullptr) {
+        for (const auto& [name, variant] : enum_type->variants) {
+            if (std::find(coverage.covered.begin(), coverage.covered.end(), variant) ==
+                coverage.covered.end()) {
+                error(expression.span, "non-exhaustive match: missing variant '" + name + "'");
+                return;
+            }
+        }
+        return;
+    }
+
+    if (scrutinee->is_builtin(BuiltinType::Bool) && coverage.covered_true &&
+        coverage.covered_false) {
+        return;
+    }
+
+    error(expression.span, "non-exhaustive match: add a '_' or binding arm");
+}
+
+bool CheckerImpl::pattern_is_irrefutable(const ast::Pattern& pattern, const TypePtr& expected,
+                                         bool bare_names_bind) const {
+    if (dynamic_cast<const ast::WildcardPattern*>(&pattern) != nullptr ||
+        dynamic_cast<const ast::ErrorPattern*>(&pattern) != nullptr) {
+        return true;
+    }
+
+    if (const auto* binding = dynamic_cast<const ast::BindingPattern*>(&pattern)) {
+        if (bare_names_bind) {
+            if (auto* variant = resolve_pattern_variant({binding->name}, expected);
+                variant != nullptr) {
+                // Bare variant name: irrefutable only for single-variant enums.
+                return variant->owner->variants.size() == 1;
+            }
+        }
+        return true;
+    }
+
+    if (dynamic_cast<const ast::LiteralPattern*>(&pattern) != nullptr) {
+        return false;
+    }
+
+    if (const auto* variant_pattern = dynamic_cast<const ast::VariantPattern*>(&pattern)) {
+        auto* variant = resolve_pattern_variant(variant_pattern->path, expected);
+        if (variant == nullptr || expected->kind != Type::Kind::Named ||
+            expected->name != variant->owner->qualified_name ||
+            variant->owner->variants.size() != 1 ||
+            variant_pattern->payload.size() != variant->payload.size()) {
+            return false;
+        }
+        const auto bindings = class_bindings(*variant->owner, expected);
+        for (std::size_t i = 0; i < variant_pattern->payload.size(); ++i) {
+            if (!pattern_is_irrefutable(*variant_pattern->payload[i],
+                                        substitute(variant->payload[i], bindings),
+                                        bare_names_bind)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+TypePtr CheckerImpl::check_match(const ast::MatchExpr& expression) {
+    const auto scrutinee = check_expression(*expression.scrutinee);
+
+    if (expression.arms.empty()) {
+        error(expression.span, "match requires at least one arm");
+        return types::error();
+    }
+
+    PatternCoverage coverage;
+    std::vector<TypePtr> arm_types;
+    arm_types.reserve(expression.arms.size());
+
+    for (const auto& arm : expression.arms) {
+        const auto saved_scope = current_scope_;
+        auto* arm_scope = make_scope(saved_scope);
+        current_scope_ = arm_scope;
+
+        auto* resolved = check_pattern(*arm.pattern, scrutinee, true);
+
+        if (arm.guard != nullptr) {
+            const auto guard_type = check_expression(*arm.guard);
+            if (!is_condition_type(guard_type)) {
+                error(arm.guard->span,
+                      "match guard must be bool, got " + guard_type->to_string());
+            }
+        }
+
+        TypePtr body_type = types::unit();
+        if (arm.body != nullptr) {
+            body_type = check_expression(*arm.body);
+        }
+
+        current_scope_ = saved_scope;
+
+        arm_types.push_back(body_type);
+        note_pattern_coverage(*arm.pattern, resolved, arm.guard != nullptr, scrutinee, coverage);
+    }
+
+    // Unify the arm body types pairwise, with never-type propagation (same
+    // rules as if branches).
+    TypePtr result = arm_types.front();
+    for (std::size_t i = 1; i < arm_types.size(); ++i) {
+        const auto& next = arm_types[i];
+        if (is_assignable(result, next) && is_assignable(next, result)) {
+            continue;
+        }
+        if (result->is_builtin(BuiltinType::Never)) {
+            result = next;
+            continue;
+        }
+        if (next->is_builtin(BuiltinType::Never)) {
+            continue;
+        }
+        error(expression.arms[i].span, "match arms have incompatible types " +
+                                           result->to_string() + " and " + next->to_string());
+        result = types::error();
+    }
+
+    check_match_exhaustiveness(expression, scrutinee, coverage);
+    return result;
+}
+
+TypePtr CheckerImpl::check_block_expr(const ast::BlockExpr& expression) {
+    const auto saved_scope = current_scope_;
+    const auto saved_loop_depth = loop_depth_;
+    auto* block_scope = make_scope(saved_scope);
+    current_scope_ = block_scope;
+    // Block arm bodies compile as immediately-called closures: control flow
+    // cannot leave them.
+    ++block_arm_depth_;
+    loop_depth_ = 0;
+
+    TypePtr result = types::unit();
+    if (const auto* block = dynamic_cast<const ast::BlockStmt*>(expression.body.get())) {
+        const bool has_tail =
+            !block->statements.empty() &&
+            dynamic_cast<const ast::ExprStmt*>(block->statements.back().get()) != nullptr;
+        const auto count =
+            block->statements.size() - (has_tail ? 1u : 0u);
+        for (std::size_t i = 0; i < count; ++i) {
+            check_statement(*block->statements[i]);
+        }
+        if (has_tail) {
+            const auto* tail =
+                static_cast<const ast::ExprStmt*>(block->statements.back().get());
+            result = check_expression(*tail->expression);
+            if (result->is_builtin(BuiltinType::Never)) {
+                result = types::unit();
+            }
+        }
+    }
+
+    --block_arm_depth_;
+    loop_depth_ = saved_loop_depth;
+    current_scope_ = saved_scope;
+    return result;
 }
 
 TypePtr CheckerImpl::check_assignment_target(const ast::Expr& expression, bool& valid) {
@@ -2598,6 +3116,14 @@ TypePtr CheckerImpl::check_expression(const ast::Expr& expression) {
 
     if (const auto* handle = dynamic_cast<const ast::HandleExpr*>(&expression)) {
         return check_handle(*handle);
+    }
+
+    if (const auto* match = dynamic_cast<const ast::MatchExpr*>(&expression)) {
+        return check_match(*match);
+    }
+
+    if (const auto* block = dynamic_cast<const ast::BlockExpr*>(&expression)) {
+        return check_block_expr(*block);
     }
 
     if (const auto* if_expression = dynamic_cast<const ast::IfExpr*>(&expression)) {

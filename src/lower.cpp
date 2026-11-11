@@ -53,6 +53,14 @@ bool is_tail_expression(const ast::BlockStmt& block) {
            dynamic_cast<const ast::ExprStmt*>(block.statements.back().get()) != nullptr;
 }
 
+// The value a pattern test operates on: the match's scrutinee local, or a
+// payload slot of an enum value bound by an enclosing variant pattern.
+struct PatternTerm {
+    bool is_payload = false;
+    std::uint32_t value_slot = 0;
+    std::uint32_t payload_index = 0;
+};
+
 BinaryOp intrinsic_binary(const std::string& op) {
     if (op == "-") return BinaryOp::Sub;
     if (op == "*") return BinaryOp::Mul;
@@ -210,8 +218,14 @@ private:
     // is always exactly one frame above the handler's delimiter: the captured
     // continuation ends at the body's Return, and the delimiter frame
     // receives the handler's value as the value of the whole `handle`
-    // expression.
-    std::uint32_t lower_handle_body(const ast::Expr& body) {
+    // expression. The emitter builds the body as a closure over its captures,
+    // so the handled expression may reference outer locals.
+    struct LoweredHandleBody {
+        std::uint32_t fn = 0;
+        std::vector<Capture> captures;
+    };
+
+    LoweredHandleBody lower_handle_body(const ast::Expr& body) {
         const auto fn_index = new_function("(handle body)", "(handle body)",
                                            Origin::HandleBody);
 
@@ -225,8 +239,11 @@ private:
         body_block.items.push_back(make_return(lower_expression(body), body.span));
         fn().body = std::move(body_block);
 
+        LoweredHandleBody lowered;
+        lowered.fn = fn_index;
+        lowered.captures = std::move(state.captures);
         state_ = state.enclosing;
-        return fn_index;
+        return lowered;
     }
 
     // Module init evaluates `handle <expr> with { ... }` declarations;
@@ -270,10 +287,13 @@ private:
             }
             const auto table =
                 register_handler_table(handler_decl->effect, handler_decl->cases);
-            const auto body_fn = lower_handle_body(*handler_decl->handled_expression);
+            const auto lowered_body = lower_handle_body(*handler_decl->handled_expression);
 
             auto handle = make_expr(Expr::Kind::Handle, handler_decl->span);
-            handle->body_fn = body_fn;
+            handle->body_fn = lowered_body.fn;
+            for (auto& capture : lowered_body.captures) {
+                handle->captures.push_back(CaptureRef{capture.is_local, capture.index});
+            }
             handle->table_ref = table;
 
             auto statement = make_stmt(Stmt::Kind::Expr, handler_decl->span);
@@ -372,6 +392,37 @@ private:
         }
 
         if (const auto* declaration = dynamic_cast<const ast::VarDeclStmt*>(&statement)) {
+            // `let` destructuring: the initializer goes into a hidden temp,
+            // then each binding in preorder becomes a VarLocal statement.
+            // Irrefutable patterns carry no variant/literal tests.
+            if (declaration->pattern != nullptr) {
+                const auto temp_slot =
+                    state_->declare("$let" + std::to_string(pattern_counter_++), fn());
+
+                auto temp = make_stmt(Stmt::Kind::VarLocal, declaration->span);
+                temp.slot = temp_slot;
+                temp.expression = declaration->initializer != nullptr
+                                      ? lower_expression(*declaration->initializer)
+                                      : make_expr(Expr::Kind::Unit, declaration->span);
+                items.push_back(std::move(temp));
+
+                std::vector<MatchTest> tests;
+                PatternTerm scrutinee_term;
+                scrutinee_term.value_slot = temp_slot;
+                lower_pattern_tests(*declaration->pattern, scrutinee_term, tests, false);
+
+                for (auto& test : tests) {
+                    if (test.kind != MatchTest::Kind::Bind) {
+                        continue;
+                    }
+                    auto bind = make_stmt(Stmt::Kind::VarLocal, declaration->span);
+                    bind.slot = test.slot;
+                    bind.expression = term_expression(test, declaration->span);
+                    items.push_back(std::move(bind));
+                }
+                return;
+            }
+
             // Slot assignment happens after the initializer lowers, matching
             // the old emission order (initializer code cannot see the slot).
             auto stmt = make_stmt(Stmt::Kind::VarLocal, declaration->span);
@@ -621,6 +672,14 @@ private:
             return lower_lambda(*lambda);
         }
 
+        if (const auto* match = dynamic_cast<const ast::MatchExpr*>(&expression)) {
+            return lower_match(*match);
+        }
+
+        if (const auto* block = dynamic_cast<const ast::BlockExpr*>(&expression)) {
+            return lower_block_expr(*block);
+        }
+
         if (const auto* resume = dynamic_cast<const ast::ResumeExpr*>(&expression)) {
             return lower_resume(*resume);
         }
@@ -628,7 +687,11 @@ private:
         if (const auto* handle = dynamic_cast<const ast::HandleExpr*>(&expression)) {
             auto expr = make_expr(Expr::Kind::Handle, handle->span);
             expr->table_ref = register_handler_table("", handle->cases);
-            expr->body_fn = lower_handle_body(*handle->body);
+            const auto lowered_body = lower_handle_body(*handle->body);
+            expr->body_fn = lowered_body.fn;
+            for (auto& capture : lowered_body.captures) {
+                expr->captures.push_back(CaptureRef{capture.is_local, capture.index});
+            }
             return expr;
         }
 
@@ -804,6 +867,158 @@ private:
             expr->captures.push_back(CaptureRef{capture.is_local, capture.index});
         }
         fn(fn_index).capture_count = static_cast<std::uint32_t>(expr->captures.size());
+        return expr;
+    }
+
+    // ------------------------------------------------------------------
+    // Pattern matching
+    // ------------------------------------------------------------------
+
+    // A statement block in expression position (`=> { ... }`) compiles as a
+    // zero-argument closure called immediately — the arm's value is the
+    // block's tail value (or a returned value flowing out as the block's
+    // value). Captures work through the regular lambda machinery.
+    ExprPtr lower_block_expr(const ast::BlockExpr& block) {
+        const auto fn_index = new_function("(block)", "(block)", Origin::Block);
+
+        FuncState state;
+        state.fn_index = fn_index;
+        state.enclosing = state_;
+        state.scopes.emplace_back();
+        state_ = &state;
+
+        if (block.body != nullptr) {
+            fn().body = lower_body(*block.body, block.span);
+        } else {
+            fn().body = unit_return_body(block.span);
+        }
+
+        auto captures = std::move(state.captures);
+        state_ = state.enclosing;
+
+        auto call = make_expr(Expr::Kind::CallValue, block.span);
+        call->object = make_closure(fn_index, block.span, std::move(captures));
+        return call;
+    }
+
+    // Walks a pattern in preorder, appending the arm's test plan. Variant and
+    // literal tests are only emitted when `test_variants` (a `let` pattern is
+    // irrefutable, so its variant tests would always pass).
+    void lower_pattern_tests(const ast::Pattern& pattern, const PatternTerm& term,
+                             std::vector<MatchTest>& tests, bool test_variants) {
+        if (dynamic_cast<const ast::WildcardPattern*>(&pattern) != nullptr ||
+            dynamic_cast<const ast::ErrorPattern*>(&pattern) != nullptr) {
+            return;
+        }
+
+        if (const auto* binding = dynamic_cast<const ast::BindingPattern*>(&pattern)) {
+            if (binding->variant != nullptr) {
+                // Bare payload-less variant name resolved by the checker.
+                if (test_variants) {
+                    MatchTest test;
+                    test.kind = MatchTest::Kind::Variant;
+                    fill_term(test, term);
+                    test.variant_id = variant_id(binding->variant);
+                    tests.push_back(std::move(test));
+                }
+                return;
+            }
+            MatchTest test;
+            test.kind = MatchTest::Kind::Bind;
+            fill_term(test, term);
+            test.slot = state_->declare(binding->name, fn());
+            tests.push_back(std::move(test));
+            return;
+        }
+
+        if (const auto* literal = dynamic_cast<const ast::LiteralPattern*>(&pattern)) {
+            if (test_variants && literal->value != nullptr) {
+                MatchTest test;
+                test.kind = MatchTest::Kind::Literal;
+                fill_term(test, term);
+                test.literal = lower_expression(*literal->value);
+                tests.push_back(std::move(test));
+            }
+            return;
+        }
+
+        if (const auto* variant_pattern = dynamic_cast<const ast::VariantPattern*>(&pattern)) {
+            if (test_variants && variant_pattern->variant != nullptr) {
+                MatchTest test;
+                test.kind = MatchTest::Kind::Variant;
+                fill_term(test, term);
+                test.variant_id = variant_id(variant_pattern->variant);
+                tests.push_back(std::move(test));
+            }
+            // Bind the enum value into an anonymous local so payload terms
+            // can reference it, then recurse into the payload patterns.
+            MatchTest bind;
+            bind.kind = MatchTest::Kind::Bind;
+            fill_term(bind, term);
+            bind.slot =
+                state_->declare("$pat" + std::to_string(pattern_counter_++), fn());
+            const auto value_slot = bind.slot;
+            tests.push_back(std::move(bind));
+
+            for (std::size_t i = 0; i < variant_pattern->payload.size(); ++i) {
+                PatternTerm payload_term;
+                payload_term.is_payload = true;
+                payload_term.value_slot = value_slot;
+                payload_term.payload_index = static_cast<std::uint32_t>(i);
+                lower_pattern_tests(*variant_pattern->payload[i], payload_term, tests,
+                                    test_variants);
+            }
+            return;
+        }
+    }
+
+    void fill_term(MatchTest& test, const PatternTerm& term) {
+        test.term = term.is_payload ? MatchTest::Term::Payload : MatchTest::Term::Scrutinee;
+        test.value_slot = term.value_slot;
+        test.payload_index = term.payload_index;
+    }
+
+    // The HIR expression reading a test's term value (for `let` bindings,
+    // which lower as plain VarLocal statements).
+    ExprPtr term_expression(const MatchTest& test, const SourceSpan& span) {
+        if (test.term == MatchTest::Term::Scrutinee) {
+            auto expr = make_expr(Expr::Kind::Local, span);
+            expr->slot = test.value_slot;
+            return expr;
+        }
+        auto expr = make_expr(Expr::Kind::EnumPayload, span);
+        auto object = make_expr(Expr::Kind::Local, span);
+        object->slot = test.value_slot;
+        expr->object = std::move(object);
+        expr->payload_index = test.payload_index;
+        return expr;
+    }
+
+    ExprPtr lower_match(const ast::MatchExpr& match) {
+        auto expr = make_expr(Expr::Kind::Match, match.span);
+        expr->scrutinee = lower_expression(*match.scrutinee);
+        expr->scrutinee_slot =
+            state_->declare("$match" + std::to_string(pattern_counter_++), fn());
+
+        for (const auto& arm : match.arms) {
+            state_->scopes.emplace_back();
+            hir::MatchArm hir_arm;
+            hir_arm.span = arm.span;
+
+            PatternTerm scrutinee_term;
+            scrutinee_term.value_slot = expr->scrutinee_slot;
+            lower_pattern_tests(*arm.pattern, scrutinee_term, hir_arm.tests, true);
+
+            if (arm.guard != nullptr) {
+                hir_arm.guard = lower_expression(*arm.guard);
+            }
+            hir_arm.body = arm.body != nullptr
+                               ? lower_expression(*arm.body)
+                               : make_expr(Expr::Kind::Unit, arm.span);
+
+            state_->scopes.pop_back();
+            expr->match_arms.push_back(std::move(hir_arm));
+        }
         return expr;
     }
 
@@ -1014,6 +1229,7 @@ private:
     const glscript::Program& program_;
     hir::Program out_;
     FuncState* state_ = nullptr;
+    std::uint32_t pattern_counter_ = 0; // hidden locals: $match/$let/$patN
 };
 
 } // namespace

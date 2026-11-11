@@ -1,14 +1,15 @@
 # glscript current state
 
-Status as of 2026-11-10. Landed: handle-body delimitation (3c09d99) → HIR
+Status as of 2026-11-11. Landed: handle-body delimitation (3c09d99) → HIR
 refactor (8ca562e) → splice-aware continuations, suite green (603d0c0) →
 scripted gravity demo (63f8416) → effects showcase (1276e65) → embedding API
-+ sandbox engine.
++ sandbox engine → pattern matching (see
+[pattern-matching-plan.md](pattern-matching-plan.md)).
 
 ## What works
 
 **Pipeline** — `lexer → parser → checker → hir::lower → hir::emit →
-interpreter` is fully wired. 41 unit tests + 4 ctest suites green (the three
+interpreter` is fully wired. 60 unit tests + 4 ctest suites green (the three
 demos run headless in ctest).
 
 - **Language core**: functions, methods, classes with multi-level inheritance
@@ -17,6 +18,15 @@ demos run headless in ctest).
   with `pub`/`export` visibility, template strings, if/while/break/continue,
   operator overloading via host thunks, `downcast::<T>` with dynamic checked
   narrowing.
+- **Pattern matching**: Rust-style `match` expressions and `let` destructuring
+  — literal/wildcard/binding patterns, enum variant patterns (bare names
+  resolve against the scrutinee's enum type, qualified paths for `dynamic`),
+  nested payload patterns, binding type annotations, guards
+  (`pattern if cond => ...`), block arm bodies (tail expression = value),
+  exhaustiveness checking (enums, bool, unit; guarded arms don't count) and
+  refutability checking for `let`. Implemented as a flat per-arm test plan in
+  HIR (`MatchTest`: variant/literal/bind conjuncts) compiled by the emitter's
+  jump patching; two new opcodes (`EnumIsVariant`, `EnumPayload`).
 - **Effects & continuations**: `handle … with {}` expressions, top-level
   ambient `handle Effect {}` declarations, handler cases with implicit
   continuation parameters, `resume` — including re-raises inside resumed
@@ -55,6 +65,22 @@ demos run headless in ctest).
 | **GC root growth** | `continuations_` and `retain`ed values are freed only when the Runtime dies. Fine for scripts and demos; long-lived engines want scoped root handles. |
 | **Dead AST** | `ast::IfExpr` exists but the parser never produces it (only `if` *statements*); lowering handles it defensively as unit. |
 | **Open roadmap items** | serialize metadata export, generic enum shorthand, recursive generic types, richer operator overloading, collection operations (README "Near-term work"). |
+
+## Fixed alongside pattern matching (2026-11-11)
+
+Three pre-existing defects surfaced by the pattern-matching tests, all fixed:
+
+- **Handled expressions could not reference outer variables** — `handle
+  f(x) with {...}` inside a function crashed the interpreter
+  (`bad_variant_access`): handle bodies compiled as bare functions, so the
+  capture's `LoadCapture` ran with no closure object. Handle bodies now
+  compile as real closures; captures are bound at delimiter-installation time.
+- **Handler-case captures** crashed the same way; they are now a clean checker
+  error (`handler cases cannot reference outer variables`), since handler
+  cases are invoked by the runtime as plain functions.
+- **Calling a function value held in a variable** (`let f = ...; f()`) never
+  bound the callee identifier and lowered to unit ("value of type unit is not
+  callable"). `resolve_callee` now binds it.
 
 ## Sequencing
 

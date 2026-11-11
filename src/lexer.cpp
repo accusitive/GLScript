@@ -22,6 +22,8 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"enum", TokenKind::KwEnum},
         {"resume", TokenKind::KwResume},
         {"dynamic", TokenKind::KwDynamic},
+        {"match", TokenKind::KwMatch},
+        {"let", TokenKind::KwLet},
         {"true", TokenKind::KwTrue},
         {"false", TokenKind::KwFalse},
         {"if", TokenKind::KwIf},
@@ -162,6 +164,10 @@ const char* keyword_text(TokenKind kind) {
         return "'enum'";
     case TokenKind::KwResume:
         return "'resume'";
+    case TokenKind::KwMatch:
+        return "'match'";
+    case TokenKind::KwLet:
+        return "'let'";
     case TokenKind::KwDynamic:
         return "'dynamic'";
     case TokenKind::KwTrue:

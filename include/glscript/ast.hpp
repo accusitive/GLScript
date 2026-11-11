@@ -8,6 +8,12 @@
 #include <string>
 #include <vector>
 
+namespace glscript {
+
+struct EnumVariantSymbol; // checker-owned variant symbol (symbols.hpp)
+
+} // namespace glscript
+
 namespace glscript::ast {
 
 struct Node {
@@ -149,6 +155,56 @@ struct ResumeExpr : Expr {
     bool wildcard = false;
 };
 
+// ---------------------------------------------------------------------------
+// Patterns (match arms, let destructuring)
+// ---------------------------------------------------------------------------
+
+struct Pattern : Node {};
+using PatternPtr = std::unique_ptr<Pattern>;
+
+struct ErrorPattern : Pattern {};
+
+struct WildcardPattern : Pattern {};
+
+// A bare name. The checker decides between a binding and a payload-less
+// variant of the expected enum type (Rust's resolution rule); when it resolves
+// to a variant, `variant` is set for the lowering pass.
+struct BindingPattern : Pattern {
+    std::string name;
+    TypeExprPtr annotation;
+    mutable EnumVariantSymbol* variant = nullptr;
+};
+
+struct LiteralPattern : Pattern {
+    ExprPtr value; // literal expression, possibly negated
+};
+
+struct VariantPattern : Pattern {
+    std::vector<std::string> path;
+    std::vector<PatternPtr> payload;
+    // Checker resolution, recorded for the lowering pass.
+    mutable EnumVariantSymbol* variant = nullptr;
+};
+
+struct MatchArm {
+    PatternPtr pattern;
+    ExprPtr guard; // null when absent
+    ExprPtr body;
+    SourceSpan span;
+};
+
+struct MatchExpr : Expr {
+    ExprPtr scrutinee;
+    std::vector<MatchArm> arms;
+};
+
+// A statement block in expression position (`=> { ... }` match arm bodies).
+// The checker treats it like a block whose value is its tail expression;
+// lowering compiles it as a zero-argument closure and calls it immediately.
+struct BlockExpr : Expr {
+    StmtPtr body; // a BlockStmt
+};
+
 struct HandlerCase {
     std::string effect;
     std::string operation;
@@ -195,6 +251,9 @@ struct ExprStmt : Stmt {
 struct VarDeclStmt : Stmt {
     TypeExprPtr type;
     std::string name;
+    // `let` destructuring form: a pattern whose bindings take the value.
+    // Null for the legacy `type name` form.
+    PatternPtr pattern;
     ExprPtr initializer;
 };
 
