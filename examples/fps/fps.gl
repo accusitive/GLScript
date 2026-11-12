@@ -1,0 +1,174 @@
+// ---------------------------------------------------------------------------
+// The fps behaviours — the Unity-C# side of the first-person demo.
+//
+// The C++ engine (fps_demo.cpp) owns the EnTT registry, the Jolt physics
+// world, the input devices, and the raylib rendering. Each entity gets a
+// behaviour instance of one of the classes below; the engine fills the
+// prefab-configured fields, keeps the instance alive, and drives the
+// lifecycle: on_start, update(dt), on_collision(other), take_damage(amount).
+//
+// The game rules live here:
+//   - firing: left click (the fire axis) spawns a projectile along the
+//     camera direction — spawn logic is script logic,
+//   - forking: when a projectile hits, it checks its own projectile
+//     component's fork budget; if forks remain, it spawns two projectiles
+//     aimed at the nearest other enemies, each with forks decremented,
+//   - damage: enemies carry health; take_damage decrements it (the host
+//     reads the fields back to draw the healthbar above the enemy's head).
+// ---------------------------------------------------------------------------
+
+import game::{Entity, Vec2, Vec3};
+
+class PlayerBehaviour extends EntityBehaviour {
+    // Prefab-configured (the engine's per-instance field overrides).
+    float speed = 0.0f;
+    float cooldown = 0.0f;
+
+    // The camera orientation is script state — the host reads these fields
+    // back every frame to aim the camera and compute camera_forward() /
+    // camera_right().
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+
+    // Runtime state.
+    float fire_timer = 0.0f;
+    Entity entity;
+
+    function update(dt: float) {
+        // Mouse look: the host feeds the frame's delta, the script owns the
+        // angles.
+        Vec2 look = look();
+        yaw = yaw + look.x;
+        pitch = pitch + look.y;
+        if (pitch > 1.5f) { pitch = 1.5f; }
+        if (pitch < -1.5f) { pitch = -1.5f; }
+
+        // Move in the camera's horizontal plane (the flat basis comes from
+        // the engine; the velocity is assembled here).
+        Vec3 fwd = camera_forward();
+        Vec3 flat = Vec3::new(fwd.x, 0.0f, fwd.z).normalized();
+        Vec3 vel = flat * (axis("forward") * speed) +
+                   camera_right() * (axis("strafe") * speed);
+        entity.set_velocity(vel);
+
+        // Left click: spawn a projectile a little ahead of the camera,
+        // flying along the view direction. The last argument is the fork
+        // budget the cascade spends below.
+        fire_timer = fire_timer - dt;
+        if (fire_timer <= 0.0f && axis("fire") > 0.0f) {
+            fire_timer = cooldown;
+            Vec3 dir = camera_forward();
+            spawn("projectile", entity.position() + dir * 0.8f, dir * 26.0f, 2);
+        }
+    }
+}
+
+class ProjectileBehaviour extends EntityBehaviour {
+    // Prefab-configured; forks is overridden per spawn (each forked child
+    // gets one fewer).
+    int forks = 0;
+    float power = 0.0f;
+    float speed = 0.0f;
+    float life = 0.0f;
+
+    // Runtime state.
+    bool spent = false;
+    Entity entity;
+
+    function update(dt: float) {
+        life = life - dt;
+        if (life <= 0.0f) {
+            despawn(entity);
+        }
+    }
+
+    function on_collision(other: Entity) {
+        // Projectile-on-projectile contacts never chain — the component
+        // check lives here, in the script, via the engine's kind() op. The
+        // spent flag keeps a multi-contact step (e.g. corner + wall in the
+        // same physics tick) from resolving twice.
+        if (spent || kind(other) == "projectile") {
+            return;
+        }
+        spent = true;
+
+        despawn(entity);
+        damage(other, power);
+
+        // The fork cascade: only while this projectile component still has
+        // budget. Two children, each aimed at another enemy, forks - 1.
+        if (forks > 0) {
+            fork_from(entity.position(), other, forks - 1);
+        }
+    }
+
+    function fork_from(here: Vec3, hit: Entity, remaining: int) {
+        array<Entity> candidates = enemies();
+        array<Entity> picked = [];
+        array<float> picked_d = [];
+
+        // Keep the two nearest candidates that aren't the entity just hit.
+        int i = 0;
+        while (i < candidates.len()) {
+            Entity candidate = candidates[i];
+            if (candidate == hit) {
+                i = i + 1;
+            } else {
+                float d = (candidate.position() - here).length();
+                if (picked.len() < 2) {
+                    picked.push(candidate);
+                    picked_d.push(d);
+                } else {
+                    int worse = 0;
+                    if (picked_d[1] > picked_d[0]) {
+                        worse = 1;
+                    }
+                    if (d < picked_d[worse]) {
+                        picked[worse] = candidate;
+                        picked_d[worse] = d;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+
+        int j = 0;
+        while (j < picked.len()) {
+            Vec3 dir = (picked[j].position() - here).normalized();
+            spawn("projectile", here, dir * speed, remaining);
+            j = j + 1;
+        }
+    }
+}
+
+class EnemyBehaviour extends EntityBehaviour {
+    // Prefab-configured; the host reads health/max_health back to draw the
+    // healthbar above the enemy's head.
+    float health = 0.0f;
+    float max_health = 0.0f;
+    float speed = 0.0f;
+    Entity entity;
+
+    function update(dt: float) {
+        // Idle until provoked, then hunt the player down.
+        if (health < max_health) {
+            Vec3 to = player().position() - entity.position();
+            Vec3 flat = Vec3::new(to.x, 0.0f, to.z).normalized();
+            entity.set_velocity(flat * speed);
+        }
+    }
+
+    function take_damage(amount: float) {
+        // The host applies damage intents in a deferred pass; several can
+        // land on a dying enemy before the despawn runs — stop at zero.
+        if (health <= 0.0f) {
+            return;
+        }
+        health = health - amount;
+        println(`enemy hit (health ${health})`);
+        if (health <= 0.0f) {
+            add_kill();
+            despawn(entity);
+        }
+    }
+}

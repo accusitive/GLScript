@@ -80,8 +80,9 @@ Global effect ops (ambient):
     projectile's fork budget),
   - `kind(entity) -> string` (prefab kind name — script uses it to ignore
     projectile↔projectile contacts),
-  - `camera_forward() -> Vec3` — computed host-side from the player
-    behaviour's `yaw`/`pitch` fields (script updates them from `look()`),
+  - `camera_forward() -> Vec3` (3D, for aiming) and `camera_right() -> Vec3`
+    (flat, for strafing) — computed host-side from the player behaviour's
+    `yaw`/`pitch` fields (script updates them from `look()`),
   - `despawn(entity)`, `add_kill()`.
 - `app::Combat::damage(target: Entity, amount: float)` — an *intent*: the
   host queues it and applies it after script execution finishes (§

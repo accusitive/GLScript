@@ -3,15 +3,16 @@
 Status as of 2026-11-11. Landed: handle-body delimitation (3c09d99) → HIR
 refactor (8ca562e) → splice-aware continuations, suite green (603d0c0) →
 scripted gravity demo (63f8416) → effects showcase (1276e65) → embedding API
-+ sandbox engine → pattern matching → arrays (see
-[pattern-matching-plan.md](pattern-matching-plan.md) and
-[arrays-plan.md](arrays-plan.md)).
++ sandbox engine → pattern matching → arrays → first-person Jolt + raylib demo
+(see [pattern-matching-plan.md](pattern-matching-plan.md),
+[arrays-plan.md](arrays-plan.md) and
+[fps-demo-plan.md](fps-demo-plan.md)).
 
 ## What works
 
 **Pipeline** — `lexer → parser → checker → hir::lower → hir::emit →
-interpreter` is fully wired. 70 unit tests + 4 ctest suites green (the three
-demos run headless in ctest).
+interpreter` is fully wired. 70 unit tests + 5 ctest suites green (the demos
+run headless in ctest).
 
 - **Language core**: functions, methods, classes with multi-level inheritance
   and absolute field slots, enums (payload + shorthand ctors), generics
@@ -55,6 +56,7 @@ demos run headless in ctest).
 |---|---|
 | `examples/sandbox/` | Unity-style embedding: behaviour classes, prefab fields, `on_start`/`update`/`on_collision` lifecycle, spawn-from-script, raylib renderer |
 | `examples/entt/` | Per-entity scripted physics (gravity sim) with EnTT + raylib |
+| `examples/fps/` | First-person shooter over **Jolt Physics**: script-owned firing, fork-cascade projectiles (contact events → script component check → re-spawn aimed at other enemies), script-side damage/health with host-rendered healthbars; arrays + entity comparison operators in the fork targeting |
 | `examples/effects/` | Algebraic effects: one battle script run under six handler stacks (transformation, god mode, layered delegation, narration re-routing, non-resuming abort) |
 
 - **Tooling**: `glc --dump-hir` prints a readable per-function IR dump —

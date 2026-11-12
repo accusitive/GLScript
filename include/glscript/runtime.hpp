@@ -51,6 +51,7 @@ public:
 
     // Value construction for host thunks.
     Value make_string(std::string value);
+    Value make_array(std::vector<Value> elements);
     Value make_object(const TypeSymbol* type, std::vector<Value> fields, void* host = nullptr);
     Value make_enum(const EnumVariantSymbol* variant, std::vector<Value> payload);
     Value make_closure(std::uint32_t function, std::vector<Value> captures);

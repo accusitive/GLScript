@@ -65,7 +65,31 @@ function(glscript_link_raylib target)
     target_compile_definitions(${target} PRIVATE GLSCRIPT_HAVE_RAYLIB)
 endfunction()
 
+# Links Jolt Physics from the system when installed, otherwise fetches and
+# builds it (tagged release, static library) into the build directory.
+function(glscript_link_jolt target)
+    find_package(Jolt QUIET)
+    if(Jolt_FOUND)
+        target_link_libraries(${target} PRIVATE Jolt)
+        return()
+    endif()
+    include(FetchContent)
+    set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+    set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+    set(TARGET_BENCHMARK OFF CACHE BOOL "" FORCE)
+    set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+    set(TARGET_PERF_TESTER OFF CACHE BOOL "" FORCE)
+    set(TARGET_TEST_SUITE OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(jolt
+        URL https://github.com/jrouwe/JoltPhysics/archive/refs/tags/v5.3.0.tar.gz
+        SOURCE_SUBDIR Build) # Jolt keeps its CMakeLists in the Build folder
+    FetchContent_MakeAvailable(jolt)
+    target_link_libraries(${target} PRIVATE Jolt)
+endfunction()
+
 option(GLSCRIPT_BUILD_ENTT_EXAMPLE "Build the EnTT integration example" ON)
+option(GLSCRIPT_BUILD_FPS_EXAMPLE "Build the first-person Jolt + raylib example" ON)
 
 # EnTT (used by the demos). Downloaded once into the build directory unless
 # GLSCRIPT_ENTT_INCLUDE_DIR points at a copy.
@@ -135,6 +159,28 @@ if(_entt_include_dir)
     glscript_link_raylib(sandbox_demo)
 
     add_test(NAME sandbox_demo COMMAND sandbox_demo --headless 300)
+
+    if(GLSCRIPT_BUILD_FPS_EXAMPLE)
+        add_executable(fps_demo
+            examples/fps/fps_demo.cpp
+            examples/engine_bindings.cpp)
+
+        target_include_directories(fps_demo PRIVATE
+            ${_entt_include_dir}
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+        target_compile_definitions(fps_demo PRIVATE
+            GLSCRIPT_FPS_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/fps/fps.gl")
+
+        target_link_libraries(fps_demo PRIVATE glscript)
+
+        glscript_link_raylib(fps_demo)
+        glscript_link_jolt(fps_demo)
+
+        # Headless run: fixed timestep + single-threaded job system keep the
+        # physics deterministic, so the fork-cascade assertions hold under ctest.
+        add_test(NAME fps_demo COMMAND fps_demo --headless 400)
+    endif()
 endif()
 
 add_executable(glscript_tests

@@ -9,6 +9,7 @@ using the working examples in the repo.
 |---|---|
 | `examples/sandbox/` | Behaviour classes, lifecycle dispatch, prefabs, spawn-from-script |
 | `examples/entt/` | Per-entity scripted physics with EnTT + raylib |
+| `examples/fps/` | First-person demo over Jolt Physics + raylib: input ops, contact-event routing, fork-cascade projectiles, damage intents, healthbar field readback |
 | `examples/effects/wave.gl` | Algebraic effects: one script, many rulebooks |
 
 ## 1. Register the host world (the "engine API")
@@ -132,5 +133,7 @@ is re-routed — all without touching the logic. See
 cmake --build build -j
 ./build/sandbox_demo            # windowed (raylib)
 ./build/sandbox_demo --headless 300   # deterministic, used by ctest
+./build/fps_demo                # first-person: Jolt physics + raylib, fork-cascade projectiles
+./build/fps_demo --headless 400       # deterministic, used by ctest
 ctest --test-dir build          # unit tests + all demos' headless runs
 ```

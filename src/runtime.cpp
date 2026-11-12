@@ -83,6 +83,12 @@ Value Runtime::make_string(std::string value) {
     return Value::heap(heap_.allocate<StringObj>(std::move(value)));
 }
 
+Value Runtime::make_array(std::vector<Value> elements) {
+    auto* array = heap_.allocate<ArrayObj>();
+    array->elements = std::move(elements);
+    return Value::heap(array);
+}
+
 Value Runtime::make_object(const TypeSymbol* type, std::vector<Value> fields, void* host) {
     auto* object = heap_.allocate<ObjectInstance>();
     object->type = type;
