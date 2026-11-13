@@ -82,7 +82,10 @@ struct FunctionBytecode {
     std::uint32_t capture_count = 0;
     std::vector<std::uint32_t> code;
     std::vector<Constant> constants;
-    std::vector<SourceSpan> spans;   // one per instruction
+    std::vector<SourceSpan> spans;   // one per code word (indexed by ip)
+    // Slot index -> declared name (debugger display only; $-prefixed for
+    // compiler-generated slots).
+    std::vector<std::string> local_names;
 };
 
 struct HandlerEntry {

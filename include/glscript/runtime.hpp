@@ -1,6 +1,7 @@
 #pragma once
 
 #include "glscript/bytecode.hpp"
+#include "glscript/debug.hpp"
 #include "glscript/diagnostic.hpp"
 #include "glscript/host.hpp"
 #include "glscript/value.hpp"
@@ -61,6 +62,25 @@ public:
 
     // Looks up a checked type by qualified name (for host thunks).
     const TypeSymbol* find_type(const std::string& qualified_name) const;
+
+    // ------------------------------------------------------------------
+    // Debugger access — read-only views for a DebugHook. Only coherent
+    // while the runtime is paused at the hook (the interpreter is not
+    // reentrant, so a debugger must never call these re-entrantly).
+    // ------------------------------------------------------------------
+
+    void set_debug_hook(DebugHook* hook) { debug_hook_ = hook; }
+
+    std::uint32_t debug_frame_count() const { return frames_.size(); }
+    DebugFrame debug_frame(std::uint32_t index) const;
+    // Reads one operand-stack slot (absolute index, not frame-relative).
+    const Value& debug_stack(std::uint32_t index) const { return stack_[index]; }
+    std::uint32_t debug_stack_size() const { return stack_.size(); }
+    // Handler delimiters currently installed, innermost last.
+    std::uint32_t debug_handler_count() const { return handlers_.size(); }
+
+    bool debug_failed() const { return failed_; }
+    Value debug_result() const { return result_; }
 
 private:
     struct Frame {
@@ -127,6 +147,7 @@ private:
     std::vector<std::vector<Value>> constants_; // per function, strings interned
     Value result_;
     bool failed_ = false;
+    DebugHook* debug_hook_ = nullptr;
 };
 
 } // namespace glscript

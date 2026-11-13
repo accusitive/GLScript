@@ -233,6 +233,10 @@ struct Function {
     bool has_receiver = false;           // methods: slot 0 is the receiver
     std::uint32_t param_count = 0;
     std::vector<std::string> param_names; // debug/dump only
+    // Slot index -> declared name (debugger display only; slots assigned in
+    // declaration order, so indices line up with local slots). Compiler-
+    // generated slots keep a $-prefixed name.
+    std::vector<std::string> local_names;
     std::uint32_t capture_count = 0;
     std::uint32_t local_count = 0;
     std::uint32_t resume_slot = kNoSlot;  // HandlerCase only: continuation param slot

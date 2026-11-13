@@ -79,6 +79,12 @@ Runtime::Runtime(const Program& program, const CompiledProgram& bytecode,
 
 Runtime::~Runtime() = default;
 
+DebugFrame Runtime::debug_frame(std::uint32_t index) const {
+    const Frame& frame = frames_[index];
+    return DebugFrame{frame.function, frame.fn, frame.ip, frame.base,
+                      frame.fn->local_count, frame.resumed_slice};
+}
+
 Value Runtime::make_string(std::string value) {
     return Value::heap(heap_.allocate<StringObj>(std::move(value)));
 }
@@ -732,6 +738,12 @@ void Runtime::execute() {
         const std::uint32_t* operands = code + ip + 1;
         frame.ip = ip + 1 + static_cast<std::uint32_t>(operand_count(op));
         const SourceSpan span = frame.fn->spans[ip];
+
+        if (debug_hook_) {
+            const DebugFrame view{frame.function, frame.fn, ip, frame.base,
+                                  frame.fn->local_count, frame.resumed_slice};
+            debug_hook_->on_instruction(*this, view, span);
+        }
 
         switch (op) {
         case Op::LoadConst:

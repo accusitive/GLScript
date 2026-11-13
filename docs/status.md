@@ -1,18 +1,20 @@
 # glscript current state
 
-Status as of 2026-11-11. Landed: handle-body delimitation (3c09d99) → HIR
+Status as of 2026-11-12. Landed: handle-body delimitation (3c09d99) → HIR
 refactor (8ca562e) → splice-aware continuations, suite green (603d0c0) →
 scripted gravity demo (63f8416) → effects showcase (1276e65) → embedding API
 + sandbox engine → pattern matching → arrays → first-person Jolt + raylib demo
-(see [pattern-matching-plan.md](pattern-matching-plan.md),
-[arrays-plan.md](arrays-plan.md) and
-[fps-demo-plan.md](fps-demo-plan.md)).
+→ TCP debug protocol + NSH debugger GUI (see
+[pattern-matching-plan.md](pattern-matching-plan.md),
+[arrays-plan.md](arrays-plan.md),
+[fps-demo-plan.md](fps-demo-plan.md) and
+[debugger-plan.md](debugger-plan.md)).
 
 ## What works
 
 **Pipeline** — `lexer → parser → checker → hir::lower → hir::emit →
-interpreter` is fully wired. 70 unit tests + 5 ctest suites green (the demos
-run headless in ctest).
+interpreter` is fully wired. 71 unit tests + 6 ctest suites green (the demos
+and the debugger protocol test run headless in ctest).
 
 - **Language core**: functions, methods, classes with multi-level inheritance
   and absolute field slots, enums (payload + shorthand ctors), generics
@@ -59,8 +61,12 @@ run headless in ctest).
 | `examples/fps/` | First-person shooter over **Jolt Physics**: script-owned firing, fork-cascade projectiles (contact events → script component check → re-spawn aimed at other enemies), script-side damage/health with host-rendered healthbars; arrays + entity comparison operators in the fork targeting |
 | `examples/effects/` | Algebraic effects: one battle script run under six handler stacks (transformation, god mode, layered delegation, narration re-routing, non-resuming abort) |
 
-- **Tooling**: `glc --dump-hir` prints a readable per-function IR dump —
-  the debugging surface the HIR refactor exists for.
+- **Tooling**: `glc --dump-hir` prints a readable per-function IR dump, and
+  `glc --dump-bytecode` shares the structured disassembler with the debugger.
+  `glc -r` runs `main`, with `--debug[=port]` serving the NDJSON debug
+  protocol (breakpoints, stepping, stack/locals, evaluate, disassembly).
+  The NSH TSX GUI in `tools/debugger/` drives it over `127.0.0.1:9000`;
+  `tests/debugger_test.cpp` exercises the wire protocol end to end.
 - **Runtime infrastructure**: mark-sweep GC with continuation + retained-root
   scanning, host-call bridge, per-instruction span tracking, and an
   `emit`/`operand_count` single-source assert in the emitter.
@@ -72,7 +78,7 @@ run headless in ctest).
 | **Indexing** | Works for `array<T>` only (reads raise `OutOfBounds`, writes raise too). Indexing other types is a checker error; chained reads into `array<dynamic>` elements need `downcast`. No collections beyond arrays yet. |
 | **Captured-variable assignment** | By-value upvalues: assigning to a captured var is silently discarded (documented limitation). |
 | **Multi-shot semantics** | `resume` is tail-position: code after a non-identity resume in the handler is dead. One activation cannot resume twice *and* use both completions at the outer level. (True recursive multi-shot — the canonical algebraic reading — would give 48, not 4, for the multi-shot test script; the implemented semantics match the committed tests.) |
-| **`glc` can't run scripts** | `glc` checks and dumps HIR only; no `-r`/run mode and no bytecode output. Running requires the C++ API. |
+| **`glc -r` / debugger** | Runs `main` and speaks the TCP protocol. Suspended continuations are not yet exposed in the stack view; `evaluate` supports literals, locals, indexing, fields, arithmetic and logic but not calls (the VM is not reentrant while paused). |
 | **Script-side virtual dispatch** | Method calls inside script resolve statically; runtime-type dispatch happens only when the *host* drives it via `call_method`. No vtables yet. |
 | **Edge cases** | `handle` *inside* a handler case + resume from within is untested; handler-case bodies that `PushHandler` then transfer-resume leave stale delimiters (safe cleanup added, but untested). Single-name handler cases in `handle` expressions resolve only against global host effects (ambiguity across effects is a checker error). |
 | **GC root growth** | `continuations_` and `retain`ed values are freed only when the Runtime dies. Fine for scripts and demos; long-lived engines want scoped root handles. |
@@ -97,5 +103,6 @@ Three pre-existing defects surfaced by the pattern-matching tests, all fixed:
 
 ## Sequencing
 
-Remaining Stage 6: `glc -r` (run mode) and the README refresh. The abandoned
-runtime rework in the git stash is superseded and can be dropped.
+Stage 6 is complete: `glc -r` (run mode), bytecode dumps and the debugger
+front end landed 2026-11-12. The abandoned runtime rework in the git stash is
+superseded and can be dropped.

@@ -1,7 +1,10 @@
 #include "glscript/checker.hpp"
+#include "glscript/debug_server.hpp"
 #include "glscript/diagnostic.hpp"
+#include "glscript/disasm.hpp"
 #include "glscript/host.hpp"
 #include "glscript/hir.hpp"
+#include "glscript/runtime.hpp"
 
 #include "engine_bindings.hpp"
 
@@ -20,16 +23,24 @@ struct Options {
     std::string file;
     std::vector<std::string> module_paths;
     bool dump_hir = false;
+    bool dump_bytecode = false;
+    bool run = false;
+    bool debug = false;
+    std::uint16_t debug_port = 9000;
     bool help = false;
 };
 
 void print_usage(std::ostream& output) {
-    output << "glc - glscript typechecker\n\n"
+    output << "glc - glscript compiler / runner\n\n"
            << "Usage: glc [options] <file.gl>\n\n"
            << "Options:\n"
-           << "  -I <dir>      Add a module search directory\n"
-           << "  --dump-hir    Print the lowered HIR after a successful check\n"
-           << "  -h, --help    Show this help\n";
+           << "  -I <dir>            Add a module search directory\n"
+           << "  --dump-hir          Print the lowered HIR after a successful check\n"
+           << "  --dump-bytecode     Print a disassembly of the compiled bytecode\n"
+           << "  -r, --run           Run the script (entry function `main`)\n"
+           << "  --debug[=port]      Run under the TCP debug server (default port 9000);\n"
+           << "                      binds 127.0.0.1 and waits for a debugger to attach\n"
+           << "  -h, --help          Show this help\n";
 }
 
 std::optional<std::string> read_file(const std::filesystem::path& path) {
@@ -53,6 +64,34 @@ bool parse_args(int argc, char** argv, Options& options) {
 
         if (argument == "--dump-hir") {
             options.dump_hir = true;
+            continue;
+        }
+
+        if (argument == "--dump-bytecode") {
+            options.dump_bytecode = true;
+            continue;
+        }
+
+        if (argument == "-r" || argument == "--run") {
+            options.run = true;
+            continue;
+        }
+
+        if (argument == "--debug") {
+            options.debug = true;
+            options.run = true;
+            continue;
+        }
+
+        if (argument.starts_with("--debug=")) {
+            options.debug = true;
+            options.run = true;
+            const auto port = std::strtoul(argument.c_str() + 8, nullptr, 10);
+            if (port == 0 || port > 65535) {
+                std::cerr << "glc: --debug expects a port in 1..65535\n";
+                return false;
+            }
+            options.debug_port = static_cast<std::uint16_t>(port);
             continue;
         }
 
@@ -83,6 +122,23 @@ bool parse_args(int argc, char** argv, Options& options) {
     }
 
     return true;
+}
+
+void dump_bytecode(const glscript::CompiledProgram& program) {
+    for (std::size_t i = 0; i < program.functions.size(); ++i) {
+        const auto& function = program.functions[i];
+        std::cout << "fn" << i << " " << function.qualified_name << " (params "
+                  << function.param_count << ", locals " << function.local_count
+                  << ")\n";
+        for (const auto& line : glscript::disassemble(function, program)) {
+            std::cout << "  " << std::to_string(line.ip) << ": " << line.text;
+            if (line.line != 0) {
+                std::cout << "   ; line " << line.line;
+            }
+            std::cout << '\n';
+        }
+        std::cout << '\n';
+    }
 }
 
 } // namespace
@@ -116,9 +172,17 @@ int main(int argc, char** argv) {
     }
 
     glscript::HostRegistry host;
-    glscript::register_engine_bindings(host);
-
     glscript::DiagnosticSink diagnostics;
+
+    // The debug server routes println through output events; the tap is
+    // filled in after the server exists.
+    glscript::DebugServer* debug_server = nullptr;
+    glscript::register_engine_bindings(host, [&](const std::string& line) {
+        if (debug_server != nullptr) {
+            debug_server->emit_output(line + "\n");
+        }
+        std::cout << line << '\n';
+    });
 
     auto loader = [search_paths](const std::string& module_name)
         -> std::optional<glscript::ModuleSource> {
@@ -170,7 +234,46 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::cout << "glc: checked " << root_path.string() << " successfully ("
-              << diagnostics.warning_count() << " warning(s))\n";
+    const auto program = glscript::compile_program(frontend.program());
+
+    if (options.dump_bytecode) {
+        dump_bytecode(program);
+        if (!options.run) {
+            return 0;
+        }
+    }
+
+    if (!options.run) {
+        std::cout << "glc: checked " << root_path.string() << " successfully ("
+                  << diagnostics.warning_count() << " warning(s))\n";
+        return 0;
+    }
+
+    // --- run mode -----------------------------------------------------------
+    glscript::Runtime runtime(frontend.program(), program, host, diagnostics);
+
+    glscript::DebugServer server(frontend.program(), program, options.debug_port);
+    if (options.debug) {
+        if (!server.start()) {
+            return 1;
+        }
+        std::fprintf(stderr, "glc: debug server listening on 127.0.0.1:%u, "
+                             "waiting for a debugger to attach...\n",
+                     static_cast<unsigned>(options.debug_port));
+        server.wait_for_client();
+        runtime.set_debug_hook(&server);
+        debug_server = &server;
+    }
+
+    const auto stem = root_path.stem().string();
+    const auto result = runtime.run(stem, "main");
+
+    if (options.debug) {
+        server.finish(runtime.debug_failed(), result);
+    }
+
+    if (diagnostics.has_errors()) {
+        return 1;
+    }
     return 0;
 }

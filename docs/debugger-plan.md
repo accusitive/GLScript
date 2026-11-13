@@ -36,8 +36,9 @@ another thread.
 ## 3. Protocol (NDJSON over TCP)
 
 Newline-delimited JSON, one message per line. Client→VM **requests** carry a
-monotonic `id`; VM→client **responses** echo it (`{"id": N, ...}`), while
-**events** have no `id` (`{"event": "...", ...}`).
+monotonic `id` and a `command` string plus that command's payload; VM→client
+**responses** echo the `id` (`{"id": N, ...}`), while **events** have no `id`
+(`{"event": "...", ...}`).
 
 | Request | Payload | Response |
 |---|---|---|
@@ -54,9 +55,9 @@ monotonic `id`; VM→client **responses** echo it (`{"id": N, ...}`), while
 | `source` | `{file}` | `{content}` |
 | `program` | | `{files:[...], functions:[{index, name, qualified_name, line_count}]}` |
 
-Events: `stopped {reason, frame_index, function, ip, line}` (reason ∈
-`entry | breakpoint | step | pause`), `output {text}` (print sink tap),
-`exited {failed, result}`.
+Events: `stopped {reason, frame_index, function, function_index, ip, line,
+file}` (reason ∈ `entry | breakpoint | step | pause`), `output {text}` (print
+sink tap), `exited {failed, result}`.
 
 Variable refs are only valid while paused (they point at live stack slots /
 heap objects); the server invalidates them on every resume.
@@ -114,3 +115,27 @@ script runs under a `DebugServer` on a background thread, the test drives the
 protocol from the main thread with a raw POSIX client, asserting entry stop,
 breakpoint hit (line + stack), stepping semantics, locals, evaluate, and
 disassemble. New ctest suite alongside the existing five.
+
+## 10. Implementation notes
+
+- `DebugServer::start()` accepts port 0 (ephemeral) and `bound_port()` reports
+  the assigned port, so the socket test never races for a fixed port.
+- A disconnected GUI can reconnect while the script is running: the hook
+  polls `accept()` and the new client gets a fresh `entry` stop. Output refs
+  are invalidated on every resume.
+- `evaluate` uses the requested frame's locals, not implicitly the top frame;
+  calls remain a clean diagnostic.
+- Breakpoint lines are matched exactly (`span.file->path()` + line), as the GUI
+  only offers source rows; setting breakpoints recompiles the whole
+  line → instruction map. A line can map to several instructions, so after a
+  breakpoint stop the hook ignores further breakpoint hits on that source line
+  until execution reaches a different line; otherwise `continue` would stop
+  once per instruction of the same statement.
+- `examples/debug/target.gl`'s `Log::note` handler resumes, so the handled
+  expression keeps `run`'s result instead of collapsing to unit.
+- GUI: `<Input>` lives in `nsh/base`; `nsh.json` grants only
+  `127.0.0.1:9000`; `nsh check` and `nsh test` pass in `tools/debugger/`.
+- Verification: six ctest suites green, including `debugger_test`; manual
+  `glc -r --debug examples/debug/target.gl` + `nsh run` in `tools/debugger/`;
+  `debugger_host examples/debug/host_demo.gl` driven through entry, two
+  breakpoints, scopes/evaluate, output events and exit.

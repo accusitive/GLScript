@@ -37,6 +37,7 @@ private:
             bytecode.param_count = function.param_count;
             bytecode.local_count = function.local_count;
             bytecode.capture_count = function.capture_count;
+            bytecode.local_names = function.local_names;
         }
         out_.handler_tables.reserve(program_.handler_tables.size());
         for (const auto& table : program_.handler_tables) {
@@ -606,6 +607,8 @@ std::size_t operand_count(Op op) {
     case Op::Abort:
     case Op::Dup:
     case Op::Pop:
+    case Op::ArrayGet:
+    case Op::ArraySet:
         return 0;
     }
     return 0;

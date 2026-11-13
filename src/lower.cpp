@@ -40,6 +40,8 @@ struct FuncState {
     std::uint32_t declare(const std::string& name, Function& fn) {
         const auto slot = local_count++;
         scopes.back().emplace(name, slot);
+        fn.local_names.resize(local_count);
+        fn.local_names[slot] = name;
         fn.local_count = local_count;
         return slot;
     }

@@ -1,0 +1,94 @@
+// ---------------------------------------------------------------------------
+// The debugger target: a deliberately stepped-through demo script for the
+// NSH debugger GUI. Run with:
+//
+//   glc -r --debug examples/debug/target.gl
+//
+// and attach the GUI (tools/debugger) to 127.0.0.1:9000. Good things to try:
+// a breakpoint on the `match` arm inside classify(), stepping through the
+// fold loop in score(), and evaluating `total * 2` while paused there.
+// ---------------------------------------------------------------------------
+
+enum Kind {
+    Empty,
+    Prime,
+    Even,
+    Odd,
+}
+
+// A script-side effect: narration is an intent; the handler in main()
+// decides where it goes.
+effect Log {
+    function note(message: String) -> unit;
+}
+
+// Classifies a sample — a compact match to step through.
+function classify(value: int) -> Kind {
+    if (value < 2) {
+        return Kind::Empty;
+    }
+    let divisor = 2;
+    while (divisor * divisor <= value) {
+        if (value % divisor == 0) {
+            if (divisor == 2) {
+                return Kind::Even;
+            }
+            return Kind::Odd;
+        }
+        divisor = divisor + 1;
+    }
+    return Kind::Prime;
+}
+
+// A tiny fold with an accumulator worth inspecting while paused.
+function score(samples: array<int>) -> int {
+    let total = 0;
+    let index = 0;
+    while (index < samples.len()) {
+        let sample = samples[index];
+        total = total + sample * (index + 1);
+        index = index + 1;
+    }
+    return total;
+}
+
+function describe(kind: Kind, value: int) -> String {
+    match kind {
+        Kind::Empty => "small",
+        Kind::Prime => `${value} is prime`,
+        Kind::Even => `${value} is even`,
+        Kind::Odd => `${value} is odd`,
+    }
+}
+
+function run(samples: array<int>) -> int {
+    let total = 0;
+    let index = 0;
+    while (index < samples.len()) {
+        let value = samples[index];
+        let kind = classify(value);
+        total = total + 1;
+        Log::note(describe(kind, value));
+        index = index + 1;
+    }
+    return total;
+}
+
+function main() {
+    let samples = [1, 2, 3, 5, 7, 11, 13, 17];
+
+    // Narration is routed through println here, which falls through to the
+    // host thunk — so notes show up on stdout and in the debugger's output
+    // panel (Log::note is raised inside a handler case; Runtime::println
+    // stays unhandled and hits the host).
+    let classified = handle (run(samples)) with {
+        Log::note(message: String) -> unit {
+            println(message);
+            resume;
+        }
+    };
+
+    println(`score: ${score(samples)}`);
+    println(`classified: ${classified}`);
+    println(`checked: ${classified * 2 + score(samples)}`);
+}

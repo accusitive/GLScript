@@ -1,0 +1,12 @@
+{
+  "name": "glscript debugger",
+  "id": "com.glscript.debugger",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "network": {
+      "sockets": ["127.0.0.1:9000"]
+    },
+    "statusBar": true
+  }
+}

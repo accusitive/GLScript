@@ -27,7 +27,51 @@ add_library(glscript
     src/hir_dump.cpp
     src/value.cpp
     src/compiler.cpp
-    src/runtime.cpp)
+    src/runtime.cpp
+    src/disasm.cpp)
+
+# ---------------------------------------------------------------------------
+# Debugger: TCP debug protocol server + expression evaluator. Separate from
+# the core library so embedders that don't need the debugger don't link
+# sockets or the JSON parser. nlohmann/json is a single header, downloaded
+# once into the build directory (same pattern as EnTT) unless
+# GLSCRIPT_JSON_INCLUDE_DIR points at a copy.
+# ---------------------------------------------------------------------------
+
+set(_json_include_dir "${GLSCRIPT_JSON_INCLUDE_DIR}")
+if(NOT _json_include_dir)
+    set(_json_include_dir "${CMAKE_BINARY_DIR}/_deps/json-include")
+    set(_json_header "${_json_include_dir}/nlohmann/json.hpp")
+    if(NOT EXISTS "${_json_header}")
+        file(MAKE_DIRECTORY "${_json_include_dir}/nlohmann")
+        message(STATUS "Downloading nlohmann/json single-header")
+        file(DOWNLOAD
+            "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp"
+            "${_json_header}"
+            STATUS _json_download_status
+            TLS_VERIFY ON)
+        list(GET _json_download_status 0 _json_download_code)
+        if(NOT _json_download_code EQUAL 0)
+            list(GET _json_download_status 1 _json_download_message)
+            file(REMOVE "${_json_header}")
+            message(WARNING
+                "Could not download nlohmann/json (${_json_download_message}). "
+                "Set GLSCRIPT_JSON_INCLUDE_DIR to a directory containing "
+                "nlohmann/json.hpp, or install nlohmann-json system-wide.")
+        endif()
+    endif()
+endif()
+
+add_library(glscript_debug
+    src/debug_server.cpp
+    src/dbg_eval.cpp)
+
+target_include_directories(glscript_debug
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${_json_include_dir})
+
+target_link_libraries(glscript_debug PUBLIC glscript)
 
 target_include_directories(glscript
     PUBLIC
@@ -42,7 +86,22 @@ add_executable(glc
 target_include_directories(glc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 
-target_link_libraries(glc PRIVATE glscript)
+target_link_libraries(glc PRIVATE glscript glscript_debug)
+
+# A deliberately small embedding host for debugging: frontend + compiler +
+# Runtime + DebugServer, plus a `hostdemo::Game` module to break on. Waits for
+# the NSH debugger or any protocol client before running main().
+add_executable(debugger_host
+    examples/debug/host.cpp
+    examples/engine_bindings.cpp)
+
+target_include_directories(debugger_host PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+target_compile_definitions(debugger_host PRIVATE
+    GLSCRIPT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+target_link_libraries(debugger_host PRIVATE glscript glscript_debug)
 
 enable_testing()
 
@@ -195,6 +254,17 @@ target_compile_definitions(glscript_tests PRIVATE
 target_link_libraries(glscript_tests PRIVATE glscript)
 
 add_test(NAME glscript_tests COMMAND glscript_tests)
+
+add_executable(debugger_test
+    tests/debugger_test.cpp
+    examples/engine_bindings.cpp)
+
+target_include_directories(debugger_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+target_link_libraries(debugger_test PRIVATE glscript glscript_debug)
+
+add_test(NAME debugger_test COMMAND debugger_test)
 
 add_executable(wave_demo
     examples/effects/wave_demo.cpp

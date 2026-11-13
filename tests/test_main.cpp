@@ -1,6 +1,7 @@
 #include "glscript/checker.hpp"
 #include "glscript/bytecode.hpp"
 #include "glscript/diagnostic.hpp"
+#include "glscript/disasm.hpp"
 #include "glscript/host.hpp"
 #include "glscript/runtime.hpp"
 
@@ -1437,6 +1438,54 @@ function helper() {
     pass("host module name collision");
 }
 
+void test_disassembler() {
+    glscript::HostRegistry host;
+    glscript::register_engine_bindings(host);
+    glscript::DiagnosticSink diagnostics;
+    glscript::Frontend frontend(host, diagnostics);
+    const bool ok = frontend.check_source("disasm", "disasm.gl", R"GL(
+function main() {
+    let values = [1, 2, 3, 4];
+    let total = 0;
+    let index = 0;
+    while (index < values.len()) {
+        total = total + values[index];
+        index = index + 1;
+    }
+    println(`total=${total}`);
+}
+)GL");
+    if (!ok) {
+        fail("disassembler", diagnostics.format());
+        return;
+    }
+
+    const auto program = glscript::compile_program(frontend.program());
+    bool found_raise = false;
+    bool found_loop = false;
+    std::size_t instruction_count = 0;
+    for (const auto& function : program.functions) {
+        for (const auto& line : glscript::disassemble(function, program)) {
+            ++instruction_count;
+            if (line.text.starts_with(
+                    "Raise \"engine::Runtime\".\"println\" argc=1")) {
+                found_raise = true;
+            }
+            if (line.text.starts_with("Loop -> ")) {
+                found_loop = true;
+            }
+        }
+    }
+
+    if (instruction_count == 0 || !found_raise || !found_loop) {
+        fail("disassembler", "missing instructions or decoded operands (raise=" +
+                                 std::to_string(found_raise) + " loop=" +
+                                 std::to_string(found_loop) + ")");
+        return;
+    }
+    pass("disassembler");
+}
+
 int main() {  // NOLINT(readability-function-size)
 
     test_entity_sketch();
@@ -1444,6 +1493,7 @@ int main() {  // NOLINT(readability-function-size)
     test_embed_behaviour_lifecycle();
     test_embed_method_dispatch();
     test_host_module_name_collision();
+    test_disassembler();
     test_unknown_identifier();
     test_wrong_argument_type();
     test_downcast();

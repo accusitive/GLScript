@@ -1,0 +1,39 @@
+// The script debugged by examples/debug/host.cpp.
+//
+// Suggested walkthrough:
+//   1. breakpoint on `let next = a + b;` in fib() — step through the loop and
+//      inspect a, b and i.
+//   2. breakpoint on `total = total + value;` in main() — evaluate
+//      `total + value`.
+//   3. step over the Game::log call to watch C++ output events arrive.
+
+import hostdemo::Game;
+
+function fib(n: int) -> int {
+    let a = 0;
+    let b = 1;
+    let i = 0;
+    let int = 100;
+    int testing = 200;
+    while (i < n) {
+        let next = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }
+    return a;
+}
+
+function main() {
+    let count = Game::frames();
+    let total = 0;
+    let index = 0;
+    while (index < count) {
+        let value = fib(index);
+        total = total + value;
+        Game::log(`fib(${index}) = ${value}`);
+        index = index + 1;
+    }
+    Game::log(`total = ${total}`);
+    println(`done: ${total}`);
+}

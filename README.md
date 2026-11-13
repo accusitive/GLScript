@@ -4,7 +4,9 @@ An embeddable, statically typed scripting language for game engines. The front
 end is written in C++20 with no external dependencies and is distributed as the
 `glscript` library.
 
-This repository currently implements the **typechecker milestone**:
+This repository implements the full pipeline — lexer, parser, typechecker,
+typed HIR, bytecode emitter and interpreter — plus a TCP debug protocol and an
+NSH debugger GUI.
 
 - lexer with source spans and diagnostics
 - parser and AST for the syntax in `entity.gl` and `rt.gl`
@@ -12,10 +14,10 @@ This repository currently implements the **typechecker milestone**:
 - gradual type checking with `dynamic` and checked `downcast::<T>`
 - classes, inheritance, fields, methods, generics, enums, and effect handlers
 - a C++ host-registration API for engine modules and global types/effects
-- a `glc` command-line typechecker and a test suite
-
-The runtime/interpreter is not implemented yet. Effects are parsed and
-typechecked; multi-shot continuation execution is the next milestone.
+- a bytecode VM with multi-shot-style `resume` continuations, mark-sweep GC
+  and per-instruction source spans
+- `glc` run mode (`-r`), HIR/bytecode dumps, and `--debug` (TCP)
+- the NSH debugger GUI in `tools/debugger/`
 
 ## Build
 
@@ -28,13 +30,60 @@ ctest --test-dir build --output-on-failure
 ## Run
 
 ```sh
-./build/glc entity.gl
-./build/glc rt.gl
-./build/glc -I path/to/modules path/to/script.gl
+./build/glc entity.gl                  # check only
+./build/glc -r examples/debug/target.gl  # run main()
+./build/glc --dump-hir entity.gl
+./build/glc --dump-bytecode examples/debug/target.gl
 ```
 
 `glc` exits with status `0` when the script and every imported module
-typecheck, and `1` when diagnostics are emitted.
+typecheck (and, in run mode, when `main` returns), and `1` when diagnostics
+are emitted.
+
+## Debugger
+
+`glc -r --debug[=port] script.gl` binds `127.0.0.1:9000` (or the given port),
+waits for a client, then runs the script under the cooperative debug server in
+`src/debug_server.cpp`. The protocol is newline-delimited JSON: breakpoints,
+continue/pause/step, stack traces, locals and expandable values, expression
+evaluation, disassembly and source loading.
+
+The GUI is an NSH TSX app (GTK4 on Linux):
+
+```sh
+# terminal 1
+./build/glc -r --debug examples/debug/target.gl
+
+# terminal 2 (nsh from https://nsh.dev/install.sh)
+cd tools/debugger
+nsh run
+```
+
+Connect to `127.0.0.1:9000`, click the gutter to set breakpoints, and use the
+toolbar to continue or step. `tools/debugger/nsh.json` grants only that socket.
+See [docs/debugger-plan.md](docs/debugger-plan.md) for the protocol tables and
+design notes.
+
+For a minimal embedding host rather than the `glc` CLI, build and run
+`debugger_host`. It loads a script, starts the debug server, waits for the GUI,
+and then runs `main()` under debugger control. It also registers a small
+`hostdemo::Game` module (`frames()`, `log(message)`) so breakpoints can walk
+through a script that calls back into C++:
+
+```sh
+# terminal 1
+cmake --build build --target debugger_host
+./build/debugger_host                    # host_demo.gl on port 9000
+./build/debugger_host examples/debug/target.gl 9000
+
+# terminal 2
+cd tools/debugger
+nsh run
+```
+
+In `examples/debug/host_demo.gl`, set breakpoints on `let next = a + b;` (in
+`fib`) and `total = total + value;` (in `main`), then inspect `a`, `b`, `i`,
+`value` or evaluate `a + b` / `total + value`.
 
 ## EnTT example
 
@@ -68,8 +117,8 @@ CMake downloads the EnTT single header into the build directory at configure
 time. To use a local copy instead, pass
 `-DGLSCRIPT_ENTT_INCLUDE_DIR=/path/containing/entt/entt.hpp`. Pass
 `-DGLSCRIPT_BUILD_ENTT_EXAMPLE=OFF` to skip the example entirely. The demo
-currently stops after typechecking; executing the script is the runtime
-milestone.
+runs its scripted physics headlessly in ctest and renders with raylib when
+given a display.
 
 ## Language surface
 
@@ -179,6 +228,10 @@ include/glscript/   public headers
   diagnostic.hpp    diagnostics with source snippets
   hir.hpp           typed HIR: lowering output, emit() and dump() entry points
   host.hpp          C++ host registration API
+  debug.hpp         DebugHook interface and read-only frame views
+  debug_server.hpp  TCP NDJSON debug server (nlohmann/json)
+  disasm.hpp        structured bytecode disassembler
+  dbg_eval.hpp      paused-frame expression evaluator
   lexer.hpp         tokenization
   parser.hpp        parser entry points
   source.hpp        source files and spans
@@ -188,10 +241,15 @@ src/                implementation
   lower.cpp         checker AST + bindings -> HIR (resolution + desugaring)
   hir_dump.cpp      HIR printer (glc --dump-hir)
   compiler.cpp      HIR -> bytecode emitter
+  runtime.cpp       bytecode interpreter, GC and effect continuations
+  disasm.cpp        disassembler shared by glc and the debug protocol
+  debug_server.cpp  TCP debug server implementing DebugHook
+  dbg_eval.cpp      debugger expression evaluator (no calls)
 examples/           example engine bindings
-examples/entt/      EnTT integration demo and its glscript script
-tools/glc.cpp       command-line typechecker
-tests/              test suite
+examples/debug/     target.gl walkthrough + minimal C++ debug host
+tools/glc.cpp       command-line compiler / runner
+tools/debugger/     NSH TSX debugger GUI
+tests/              test suite (including debugger_test.cpp)
 entity.gl, rt.gl    language sketches
 ```
 
@@ -202,17 +260,16 @@ receives the operation arguments and may `resume <value>` the continuation.
 The typechecker validates operation lookup, argument/result types, and the
 value passed to `resume`.
 
-The selected runtime semantics are **multi-shot continuations**: a handler may
-resume more than once. The current milestone deliberately stops at the
-typechecker; no continuation capture or execution exists yet. The AST,
-`#[abort]` metadata, and handler scopes are structured so the runtime can use
-CPS/continuation-based execution without changing the surface syntax.
+The VM executes handlers with splice-aware continuation capture. `resume` is
+tail-position: following a non-identity resume in the handler is dead, and one
+activation cannot resume twice *and* combine both completions at the outer
+level. The implemented tests pin those semantics (see
+[docs/status.md](docs/status.md)).
 
 ## Near-term work
 
-1. Runtime/interpreter with multi-shot resumable handlers (`resume` continuations)
-2. Runtime installation of the native `Runtime` effect and host-call bridge
-3. `serialize` metadata export for `export` declarations
-4. Unit tests for serialization and host-call ABI
-5. Full generic enum shorthand and recursive generic types
-6. Collection/vector operations and richer operator overloading
+1. `serialize` metadata export for `export` declarations
+2. Unit tests for serialization and the host-call ABI
+3. Full generic enum shorthand and recursive generic types
+4. Collection/vector operations and richer operator overloading
+5. Script-side virtual dispatch (the host can already dispatch via `call_method`)
