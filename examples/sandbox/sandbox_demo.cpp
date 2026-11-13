@@ -14,9 +14,11 @@
 //
 // Run windowed:            ./sandbox_demo
 // Run headless (for ctest): ./sandbox_demo --headless [frames]
+// Debug (waits for the NSH debugger): ./sandbox_demo --debug[=port]
 
 #include <entt/entt.hpp>
 
+#include "debug_session.hpp"
 #include "engine_bindings.hpp"
 
 #include "glscript/bytecode.hpp"
@@ -653,8 +655,19 @@ int main(int argc, char** argv) {
 
     bool headless = false;
     int frames = 300;
+    glscript::demo::DebugOptions debug_options;
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
+        std::string error;
+        switch (glscript::demo::parse_debug_argument(argument, debug_options, error)) {
+        case glscript::demo::DebugArgResult::Parsed:
+            continue;
+        case glscript::demo::DebugArgResult::Invalid:
+            std::cerr << "sandbox_demo: " << error << '\n';
+            return 2;
+        case glscript::demo::DebugArgResult::NotDebug:
+            break;
+        }
         if (argument == "--headless") {
             headless = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -680,7 +693,13 @@ int main(int argc, char** argv) {
         {{"speed", glscript::Value::floating(90.0)}}};
 
     glscript::HostRegistry host;
-    glscript::register_engine_bindings(host); // println / log
+    glscript::demo::DebugSession* debug_session = nullptr;
+    glscript::register_engine_bindings(host, [&](const std::string& line) {
+        std::cout << line << '\n';
+        if (debug_session != nullptr) {
+            debug_session->emit_output(line + '\n');
+        }
+    });
     register_bindings(host, sandbox);
 
     glscript::DiagnosticSink diagnostics;
@@ -693,6 +712,12 @@ int main(int argc, char** argv) {
     const auto& program = frontend.program();
     auto bytecode = glscript::compile_program(program);
     glscript::Runtime runtime(program, bytecode, host, diagnostics);
+
+    glscript::demo::DebugSession session(runtime, program, bytecode, debug_options);
+    debug_session = &session;
+    if (!session.start()) {
+        return 1;
+    }
 
     // The player: an entity plus its behaviour, the engine acting as prefab.
     const Prefab player_prefab{

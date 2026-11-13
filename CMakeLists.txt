@@ -194,7 +194,7 @@ if(_entt_include_dir)
         target_compile_definitions(entt_demo PRIVATE
             GLSCRIPT_ENTT_DEMO_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/entt/gravity.gl")
 
-        target_link_libraries(entt_demo PRIVATE glscript)
+        target_link_libraries(entt_demo PRIVATE glscript glscript_debug)
 
         # Headless run: the physics is fully scripted, so this exercises the
         # runtime end to end without opening a window.
@@ -213,7 +213,7 @@ if(_entt_include_dir)
     target_compile_definitions(sandbox_demo PRIVATE
         GLSCRIPT_SANDBOX_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/sandbox/sandbox.gl")
 
-    target_link_libraries(sandbox_demo PRIVATE glscript)
+    target_link_libraries(sandbox_demo PRIVATE glscript glscript_debug)
 
     glscript_link_raylib(sandbox_demo)
 
@@ -231,7 +231,7 @@ if(_entt_include_dir)
         target_compile_definitions(fps_demo PRIVATE
             GLSCRIPT_FPS_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/examples/fps/fps.gl")
 
-        target_link_libraries(fps_demo PRIVATE glscript)
+        target_link_libraries(fps_demo PRIVATE glscript glscript_debug)
 
         glscript_link_raylib(fps_demo)
         glscript_link_jolt(fps_demo)
@@ -276,7 +276,7 @@ target_include_directories(wave_demo PRIVATE
 target_compile_definitions(wave_demo PRIVATE
     GLSCRIPT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
-target_link_libraries(wave_demo PRIVATE glscript)
+target_link_libraries(wave_demo PRIVATE glscript glscript_debug)
 
 add_test(NAME wave_demo
          COMMAND wave_demo ${CMAKE_CURRENT_SOURCE_DIR}/examples/effects/wave.gl)

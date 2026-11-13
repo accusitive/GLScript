@@ -9,9 +9,11 @@
 //
 // Run windowed:      ./entt_demo [script.gl]
 // Run headless (for tests): ./entt_demo --headless [frames] [script.gl]
+// Debug (waits for the NSH debugger): ./entt_demo --debug[=port]
 
 #include <entt/entt.hpp>
 
+#include "debug_session.hpp"
 #include "engine_bindings.hpp"
 
 #include "glscript/bytecode.hpp"
@@ -349,8 +351,19 @@ int main(int argc, char** argv) {
 
     bool headless = false;
     int frames = 240;
+    glscript::demo::DebugOptions debug_options;
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
+        std::string error;
+        switch (glscript::demo::parse_debug_argument(argument, debug_options, error)) {
+        case glscript::demo::DebugArgResult::Parsed:
+            continue;
+        case glscript::demo::DebugArgResult::Invalid:
+            std::cerr << "entt_demo: " << error << '\n';
+            return 2;
+        case glscript::demo::DebugArgResult::NotDebug:
+            break;
+        }
         if (argument == "--headless") {
             headless = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -364,7 +377,13 @@ int main(int argc, char** argv) {
     auto world = ScriptWorld::make(12);
 
     glscript::HostRegistry host;
-    glscript::register_engine_bindings(host); // println and friends
+    glscript::demo::DebugSession* debug_session = nullptr;
+    glscript::register_engine_bindings(host, [&](const std::string& line) {
+        std::cout << line << '\n';
+        if (debug_session != nullptr) {
+            debug_session->emit_output(line + '\n');
+        }
+    });
     register_game_bindings(host, world);
 
     glscript::DiagnosticSink diagnostics;
@@ -376,6 +395,13 @@ int main(int argc, char** argv) {
 
     auto bytecode = glscript::compile_program(frontend.program());
     glscript::Runtime runtime(frontend.program(), bytecode, host, diagnostics);
+
+    glscript::demo::DebugSession session(runtime, frontend.program(), bytecode,
+                                         debug_options);
+    debug_session = &session;
+    if (!session.start()) {
+        return 1;
+    }
 
     const std::string module_name = std::filesystem::path(script_path).stem().string();
 

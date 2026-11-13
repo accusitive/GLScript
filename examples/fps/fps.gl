@@ -102,8 +102,15 @@ class ProjectileBehaviour extends EntityBehaviour {
         }
     }
 
+    /* fork_from :: (Vec3, Entity, int)
+                        (here, hit,    2) => {}
+                        (here, hit,    3) => {}
+                        (here, hit,    _) => {}
+    } */
     function fork_from(here: Vec3, hit: Entity, remaining: int) {
         array<Entity> candidates = enemies();
+        
+
         array<Entity> picked = [];
         array<float> picked_d = [];
 
